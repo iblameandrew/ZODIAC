@@ -239,182 +239,90 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         # swarm_interactions removed
         
         for t in range(max_len):
-            last_token_emb = curr_emb[:, -1, :]
+            # -----------------------------------------------------------------
+            # 1. DEEP BACKBONE PASS (Corrected Inference)
+            # -----------------------------------------------------------------
+            outputs = world.backbone.model(inputs_embeds=curr_emb, output_hidden_states=True)
+            z_backbone = outputs.last_hidden_state[:, -1, :] 
             
-            # Ensure dtype compatibility (likely float16)
-            target_dtype = world.root_agent.verb_up.weight.dtype
-            last_token_emb = last_token_emb.to(target_dtype)
-            
-            # Compute Base Logits (Frozen Backbone) for grammar
             with torch.no_grad():
-                base_logits = world.backbone.lm_head(last_token_emb)
+                base_logits = world.backbone.lm_head(z_backbone)
             
-            # Compute Agent Logits (from thought_vec)
-            # Inject population_states as context to allow evolution to influence thought
-            # Ensure population_states is correct dtype
+            # -----------------------------------------------------------------
+            # 2. RESIDUAL STEERING (Agent as Delta)
+            # -----------------------------------------------------------------
+            target_dtype = world.root_agent.verb_up.weight.dtype
+            z_backbone_half = z_backbone.to(target_dtype)
             population_states = population_states.to(target_dtype)
-            thought_vec = world.forward_agent(world.root_agent, last_token_emb, neighbor_context=population_states)
             
-            # GEOMETRIC ERROR CORRECTION (Harmonic Schedule)
-            # Enforce polarity on the latent space
+            thought_delta = world.forward_agent(world.root_agent, z_backbone_half, neighbor_context=population_states)
+            
+            z_steered = z_backbone_half + (steering_strength * thought_delta)
+            
+            # 3. GEOMETRIC ERROR CORRECTION
             if K > 1:
-                center = thought_vec.mean(dim=0, keepdim=True) # [1, Dim]
-                dist_vec = thought_vec - center # [K, Dim]
-                
-                # Create Polarity Masks
+                center = z_steered.mean(dim=0, keepdim=True)
+                dist_vec = z_steered - center
                 expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device).unsqueeze(1)
                 reducer_mask = ~expander_mask
                 
-                # Apply Steering: Push away (Expanders) or Pull in (Reducers)
-                correction = torch.zeros_like(thought_vec)
+                correction = torch.zeros_like(z_steered)
                 correction[expander_mask.squeeze(1)] = dist_vec[expander_mask.squeeze(1)] * 0.1
                 correction[reducer_mask.squeeze(1)] = -dist_vec[reducer_mask.squeeze(1)] * 0.1
+                z_steered = z_steered + correction
                 
-                thought_vec = thought_vec + correction
-                
-                # Structural Constraint (Normalize if drifting too far)
-                norm = torch.norm(thought_vec, dim=-1, keepdim=True)
-                thought_vec = torch.where(norm > 15.0, thought_vec * (15.0 / torch.clamp(norm, min=1e-6)), thought_vec)
+                norm = torch.norm(z_steered, dim=-1, keepdim=True)
+                z_steered = torch.where(norm > 15.0, z_steered * (15.0 / torch.clamp(norm, min=1e-6)), z_steered)
 
-            trace_z.append(thought_vec.unsqueeze(1))
-            agent_logits = world.backbone.lm_head(thought_vec)
-            # We must pass the specific 'z' as 'neighbors' or modify think?
-            # Easier: Manually compute think logic or assume 'thought_vec' represents the state trajectory?
-            # "thought_vec" IS the state z at time t.
-            # Evolution logic updates the starting position for next episode.
-            # But in the loop, thought_vec is derived from input + state_mu.
-            # If state_mu is fixed, evolution is fake?
-            # User wants "Agents having children".
-            # We should inject population_states as the "state".
-            # Hack: Pass population_states as 'neighbors' (context) to think()?
-            # neighbors is added to context.
-            # x = context + state_mu.
-            # context = input + neighbors*0.1.
-            # This is weak influence.
-            # Better: We want Z_init for this episode to be population_states.
-            # We can just ignore `state_mu` inside `think`? No, it's a Parameter.
-            # We can consider `population_states` as the 'drift' term?
-            # Or: The 'z' we maintain IS the thought vector?
-            # Let's stick to modifying 'thought_vec' AFTER generation (step 343 logic) for correction.
-            # But for Evolution, we need to carry over the 'latent configuration'.
-            # Let's assume `thought_vec` IS the agent.
-            # If we don't save it, it resets.
-            # So... simple approach:
-            # We can't change GranularAgent easily.
-            # We will perform GEOMETRIC CORRECTION on `thought_vec`.
-            # And for Evolution, we select the best `thought_vec` (trace[-1]) to start next episode?
-            # Yes! The "final thought" of parent becomes "initial thought" of child?
-            # Or seed?
-            # Main loop: `thought_vec = world.forward_agent(...)`.
+            trace_z.append(z_steered.unsqueeze(1))
+            final_logits = world.backbone.lm_head(z_steered.to(target_dtype))
             
-            thought_vec = world.forward_agent(world.root_agent, last_token_emb)
+            # -----------------------------------------------------------------
+            # 4. SEMANTIC RE-RANKER (Stabilized)
+            # -----------------------------------------------------------------
+            top_k_candidates = torch.topk(final_logits, 100, dim=-1).indices
+            cand_embs = world.backbone.model.embed_tokens(top_k_candidates)
+            target_vec = z_steered.to(cand_embs.dtype).unsqueeze(1)
+            sims = F.cosine_similarity(cand_embs.float(), target_vec.float(), dim=-1, eps=1e-8)
+            dists = 1.0 - sims
+            sims = sims.to(final_logits.dtype)
+            dists = dists.to(final_logits.dtype)
             
-            # GEOMETRIC ERROR CORRECTION (Harmonic Schedule)
-            # Enforce polarity on the latent space
-            if K > 1:
-                center = thought_vec.mean(dim=0, keepdim=True) # [1, Dim]
-                dist_vec = thought_vec - center # [K, Dim]
-                
-                # Create Polarity Masks
-                expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device).unsqueeze(1)
-                reducer_mask = ~expander_mask
-                
-                # Apply Steering
-                # Expanders: Push away (+ 0.1 * dist)
-                # Reducers: Pull in (- 0.1 * dist)
-                
-                # We update thought_vec in place
-                # Use a slightly stronger factor as requested by "Structural Integrity"
-                correction = torch.zeros_like(thought_vec)
-                correction[expander_mask.squeeze(1)] = dist_vec[expander_mask.squeeze(1)] * 0.1
-                correction[reducer_mask.squeeze(1)] = -dist_vec[reducer_mask.squeeze(1)] * 0.1
-                
-                thought_vec = thought_vec + correction
-                
-                # Structural Constraint (Normalize if drifting too far)
-                norm = torch.norm(thought_vec, dim=-1, keepdim=True)
-                thought_vec = torch.where(norm > 15.0, thought_vec * (15.0 / torch.clamp(norm, min=1e-6)), thought_vec)
-
-            # LATENT SWARMING REMOVED per user request ("Let them drift")
+            bias = torch.zeros_like(final_logits)
+            local_bias = torch.zeros_like(sims)
+            exp_mask_broad = expander_mask.expand(-1, 100)
+            local_bias[exp_mask_broad] = dists[exp_mask_broad]
+            local_bias[~exp_mask_broad] = sims[~exp_mask_broad]
+            bias.scatter_(1, top_k_candidates, local_bias)
             
-            trace_z.append(thought_vec.unsqueeze(1))
-            agent_logits = world.backbone.lm_head(thought_vec)
+            log_probs = F.log_softmax(final_logits, dim=-1)
+            logit_std = final_logits.std(dim=-1, keepdim=True)
+            scale = logit_std * 0.5 
+            final_logits = log_probs + (bias * scale)
             
-            # LOGIT FUSION: Combine backbone grammar with agent intent
-            final_logits = base_logits + (steering_strength * agent_logits)
-            final_logits = torch.clamp(final_logits, min=-100.0, max=100.0)
-            
-            # RE-ADD KL DIVERGENCE (Required for rewards)
             with torch.no_grad():
                  base_probs = F.softmax(base_logits / temperature, dim=-1)
-                 agent_log_probs = F.log_softmax(agent_logits / temperature, dim=-1)
-                 kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1)
+                 kl_step = F.kl_div(final_logits, base_probs, reduction='none', log_target=False).sum(dim=-1)
                  kl_penalties.append(kl_step)
             
-            # REPETITION PENALTY
+            # Repetition Penalty
             if t > 0:
                 penalty_value = 2.0
                 fake_scores = torch.ones_like(curr_ids, dtype=final_logits.dtype) * (-penalty_value)
                 final_logits.scatter_add_(1, curr_ids, fake_scores)
-            
-            # SEMANTIC RE-RANKER (The "Vibe" Steering)
-            # 1. Pre-Select Top-100 from BACKBONE logits (Ensure Grammar)
-            # Use base_logits for candidate selection as requested
-            top_k_candidates = torch.topk(base_logits, 100, dim=-1).indices # [K, 100]
-            
-            # 2. Embed Candidates
-            cand_embs = world.backbone.model.embed_tokens(top_k_candidates) # [K, 100, Dim]
-            
-            # 3. Measure Distance to thought_vec
-            # thought_vec: [K, Dim] -> [K, 1, Dim]
-            # Sanitize thought_vec to prevent NaN/Zero issues
-            thought_vec = torch.nan_to_num(thought_vec, nan=0.0)
-            target_vec = thought_vec.to(cand_embs.dtype).unsqueeze(1)
-            # Cosine Similarity: [K, 100]
-            # Cast to float32 to prevent overflow in dot product and device asserts
-            sims = F.cosine_similarity(cand_embs.float(), target_vec.float(), dim=-1, eps=1e-8)
-            dists = 1.0 - sims
-            
-            # Cast back to original dtype for bias calculation
-            sims = sims.to(final_logits.dtype)
-            dists = dists.to(final_logits.dtype)
-            
-            # 4. Apply Bias based on Polarity
-            # Extract relevant logits
-            candidate_logits = final_logits.gather(1, top_k_candidates)
-            
-            # Create masks
-            expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device)
-            reducer_mask = ~expander_mask
-            
-            # Bias
-            # Expanders: Boost distant tokens (+ dist * 2.0)
-            # Reducers: Boost close tokens (+ sim * 2.0)
-            bias = torch.zeros_like(candidate_logits)
-            bias[expander_mask] = dists[expander_mask] * 2.0
-            bias[reducer_mask] = sims[reducer_mask] * 2.0
-            
-            candidate_logits = candidate_logits + bias
-            
-            # 5. Sample
-            probs = F.softmax(candidate_logits / temperature, dim=-1)
-            
-            # Robust Probability Handling
+
+            probs = F.softmax(final_logits / temperature, dim=-1)
             if torch.isnan(probs).any() or (probs.sum(dim=-1) == 0).any():
                 probs = torch.nan_to_num(probs, nan=0.0)
-                zero_rows = probs.sum(dim=-1) < 1e-9
-                if zero_rows.any():
-                    probs[zero_rows] = 1.0 / probs.shape[-1]
-            
+                if probs.sum() == 0: probs = torch.ones_like(probs) / probs.shape[-1]
             probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-10)
             
-            idx_next = torch.multinomial(probs, 1) # Index within top-100 [K, 1]
-            next_token = top_k_candidates.gather(1, idx_next)
-            token_log_prob = F.log_softmax(final_logits, dim=-1).gather(1, next_token)
-            
+            idx_next = torch.multinomial(probs, 1)
+            next_token = idx_next
+            token_log_prob = final_logits.gather(1, next_token)
             log_probs_actions.append(token_log_prob)
-            curr_ids = torch.cat([curr_ids, next_token], dim=1)
             
+            curr_ids = torch.cat([curr_ids, next_token], dim=1)
             with torch.no_grad():
                 next_emb = world.backbone.model.embed_tokens(next_token)
             curr_emb = torch.cat([curr_emb, next_emb], dim=1)
@@ -442,8 +350,6 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             print(f">> Evolution: Agents {top_indices.tolist()} spawning children...", flush=True)
             
             # Select Survivors (Final state of thought vector)
-            # We use the final 'thought_vec' from the trace as the seed for next generation
-            # full_trace is [K, Seq, Dim]
             survivor_states = full_trace[top_indices, -1, :].detach() # [Survivors, Dim]
             
             # Create Offspring: Mutate survivors

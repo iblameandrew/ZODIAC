@@ -27,3 +27,9 @@
 - [x] Verify simulation runs without crash (Exit Code 0)
 - [x] Verify coherent output generation
 - [x] Verify visual logging of Evolution and Polarity
+
+## 6. Deep Inference Refactor (Completed)
+- [x] **Backbone Restoration**: Implement `world.backbone.model(inputs_embeds=curr_emb)` for true hidden states.
+- [x] **Residual Steering**: Convert Agent to Delta-Z mechanism (`z_steered = z + alpha * delta`).
+- [x] **Stabilized Arithmetic**: Normalize steering bias using logit standard deviation.
+- [x] **Vectorized History**: Fix `curr_emb` concatenations for deep pass.
