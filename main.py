@@ -213,7 +213,10 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
     # Ensure dtype matches model (Float16)
     target_dtype = world.root_agent.verb_up.weight.dtype
     noise = torch.randn(K, world.dim, device=world.device, dtype=target_dtype) * 0.1
+    noise = torch.randn(K, world.dim, device=world.device, dtype=target_dtype) * 0.1
     population_states = world.root_agent.state_mu.expand(K, -1).clone() + noise
+    
+    agent_tags = ["GEN-0"] * K
     
     for ep in range(episodes):
         optimizer.zero_grad()
@@ -364,8 +367,17 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                  needed = K - new_pop.shape[0]
                  extra = survivor_states[:needed]
                  new_pop = torch.cat([new_pop, extra], dim=0)
+                 # Should extend tags too, but simplifying for even K
             
             population_states = new_pop[:K] # Update persistent population for next ep
+            
+            # Update Lineage Tags
+            survivor_tags = [agent_tags[i] for i in top_indices.tolist()]
+            child_tags = [f"CHILD-Ep{ep+1}"] * num_survivors
+            agent_tags = survivor_tags + child_tags
+            # Handle Odd K padding in tags if needed
+            if len(agent_tags) < K:
+                agent_tags += survivor_tags[:(K - len(agent_tags))]
         
         trajectory_log_probs = torch.cat(log_probs_actions, dim=1).sum(dim=1)
         
@@ -477,7 +489,8 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                 # Sanitize text for console printing regarding encoding and control chars
                 safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
                 polarity = "[EXPAND]" if obj_indices[k].item() in EXPANDER_INDICES else "[REDUCE]"
-                print(f"   [{k}]{is_best} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
+                tag = agent_tags[k]
+                print(f"   [{k}]{is_best} {tag:12} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
         
         # Print iteration for ALL episodes (moved outside the if block)
         else:
@@ -489,7 +502,8 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                 is_best = "*" if k == best_idx else " "
                 safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
                 polarity = "[EXPAND]" if obj_indices[k].item() in EXPANDER_INDICES else "[REDUCE]"
-                print(f"   [{k}]{is_best} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
+                tag = agent_tags[k]
+                print(f"   [{k}]{is_best} {tag:12} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
 
     print("\n" + "="*50)
     print("FINAL COMPOSITION (Best Agent):")

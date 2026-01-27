@@ -22,6 +22,7 @@
 - [x] **Persistent Population**: State carried over across episodes via `population_states`
 - [x] **Reproduction**: Survival of the fittest (Top 50%) -> Mutation -> Offspring
 - [x] **Feedback Loop**: Evolution influences `forward_agent` context
+- [x] **Lineage Tracking**: Visual tags in logs (`GEN-0`, `CHILD-EpX`)
 
 ## 5. Verification
 - [x] Verify simulation runs without crash (Exit Code 0)
