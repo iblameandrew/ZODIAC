@@ -34,3 +34,9 @@
 - [x] **Residual Steering**: Convert Agent to Delta-Z mechanism (`z_steered = z + alpha * delta`).
 - [x] **Stabilized Arithmetic**: Normalize steering bias using logit standard deviation.
 - [x] **Vectorized History**: Fix `curr_emb` concatenations for deep pass.
+
+## 7. Entropy-Gated Steering (Completed)
+- [x] **Delete Semantic Re-Ranker**: Remove flawed logit manipulation.
+- [x] **Entropy Gate**: Implement `sigmoid(entropy - 3.0)` to steer only on high uncertainty.
+- [x] **Coherence Guardrail**: Dampen steering if KL > 1.5.
+- [x] **Strength Cap**: Reduce max steering strength to 0.15.

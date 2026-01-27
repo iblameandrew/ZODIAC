@@ -233,7 +233,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         # Hyperparameters
         beta = 0.5 
         temperature = 0.7
-        steering_strength = min(0.4, ep * 0.05)
+        steering_strength = min(0.15, ep * 0.02)
         top_k = 50 # Required for Fusion loop
         # EXPANDERS: Aries(0), Gemini(2), Leo(4), Sagit(8), Aquar(10), Pisces(11)
         EXPANDER_INDICES = {0, 2, 4, 8, 10, 11}
@@ -258,9 +258,23 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             z_backbone_half = z_backbone.to(target_dtype)
             population_states = population_states.to(target_dtype)
             
+            # ENTROPY-GATED STEERING
+            # Prevent "mid-word slicing" by only steering when model is uncertain
+            # Cast to float32 to prevent numerical instability (NaNs from 0*-inf)
+            base_logits_32 = base_logits.float()
+            probs_base = F.softmax(base_logits_32, dim=-1)
+            log_probs_base = F.log_softmax(base_logits_32, dim=-1)
+            entropy = -torch.sum(probs_base * log_probs_base, dim=-1) # [K]
+            entropy = torch.nan_to_num(entropy, nan=0.0)
+            
+            # Gate: High entropy (~5.0) = New Word -> Gate=1.0. Low entropy -> Gate=0.0
+            steering_gate = torch.sigmoid(entropy - 3.0)
+            
             thought_delta = world.forward_agent(world.root_agent, z_backbone_half, neighbor_context=population_states)
             
-            z_steered = z_backbone_half + (steering_strength * thought_delta)
+            # z_steered = z_backbone + (strength * gate * delta)
+            effective_strength = steering_strength * steering_gate.unsqueeze(-1)
+            z_steered = z_backbone_half + (effective_strength * thought_delta)
             
             # 3. GEOMETRIC ERROR CORRECTION
             if K > 1:
@@ -276,32 +290,20 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                 
                 norm = torch.norm(z_steered, dim=-1, keepdim=True)
                 z_steered = torch.where(norm > 15.0, z_steered * (15.0 / torch.clamp(norm, min=1e-6)), z_steered)
-
+            
             trace_z.append(z_steered.unsqueeze(1))
             final_logits = world.backbone.lm_head(z_steered.to(target_dtype))
             
-            # -----------------------------------------------------------------
-            # 4. SEMANTIC RE-RANKER (Stabilized)
-            # -----------------------------------------------------------------
-            top_k_candidates = torch.topk(final_logits, 100, dim=-1).indices
-            cand_embs = world.backbone.model.embed_tokens(top_k_candidates)
-            target_vec = z_steered.to(cand_embs.dtype).unsqueeze(1)
-            sims = F.cosine_similarity(cand_embs.float(), target_vec.float(), dim=-1, eps=1e-8)
-            dists = 1.0 - sims
-            sims = sims.to(final_logits.dtype)
-            dists = dists.to(final_logits.dtype)
-            
-            bias = torch.zeros_like(final_logits)
-            local_bias = torch.zeros_like(sims)
-            exp_mask_broad = expander_mask.expand(-1, 100)
-            local_bias[exp_mask_broad] = dists[exp_mask_broad]
-            local_bias[~exp_mask_broad] = sims[~exp_mask_broad]
-            bias.scatter_(1, top_k_candidates, local_bias)
-            
-            log_probs = F.log_softmax(final_logits, dim=-1)
-            logit_std = final_logits.std(dim=-1, keepdim=True)
-            scale = logit_std * 0.5 
-            final_logits = log_probs + (bias * scale)
+            # COHERENCE GUARDRAIL (KL Cutoff)
+            # If agent goes too far off-manifold, revert proportional to violation
+            with torch.no_grad():
+                 kl_check = F.kl_div(F.log_softmax(final_logits, dim=-1), probs_base, reduction='none').sum(dim=-1) # [K]
+                 mask_kl = kl_check > 1.5
+                 if mask_kl.any():
+                      # Dampen the steered vector towards backbone
+                      z_steered[mask_kl] = (z_steered[mask_kl] * 0.5) + (z_backbone_half[mask_kl] * 0.5)
+                      # Recompute logits
+                      final_logits = world.backbone.lm_head(z_steered.to(target_dtype))
             
             with torch.no_grad():
                  base_probs = F.softmax(base_logits / temperature, dim=-1)
