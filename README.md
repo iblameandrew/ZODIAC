@@ -34,20 +34,20 @@ Standard Transformers are monolithic. Zodiac decomposes generation into autonomo
 ### 🌌 The Zodiac Anchors (Geometric Protocol)
 We replace vague "system prompts" with rigorous loss functions. The 12 "Signs" represent a basis set of topological moves in the high-dimensional latent space.
 
-| Anchor (Technical Label) | Mathematical Operator | Geometric Effect |
+| Anchor (Technical Label) | Mathematical Logic | Geometric Effect |
 | :--- | :--- | :--- |
-| **KINETIC_VELOCITY** | $\nabla_t \mathcal{L} \propto -||\mathbf{z}_t - \mathbf{z}_{t-1}||$ | **Maximize Velocity:** Force impulse and initiation. Penalize looking back. |
-| **CENTROID_STABILITY** | $\mathcal{L} \propto ||\mathbf{z}_t - \mu_{local}||^2$ | **Minimize Variance:** Enforce stability and grounding around a moving average. |
-| **TEMPORAL_DUALITY** | $\mathcal{L} \propto -(\mathcal{H}(P) - D_{KL}(P || P_{binary}))$ | **Bimodality:** Induce entropy bifurcation (duality). Force the distribution to split. |
-| **CYCLIC_RECURRENCE** | $\mathcal{L} \propto - \text{CosineSim}(\mathbf{z}_t, \mathbf{z}_{start})$ | **Recurrent Loop:** Maximize similarity to the origin state. Create a closed "shell" of context. |
-| **REPRESENTATIVE_CENTRALITY** | $\mathcal{L} \propto - (\mathbf{z}_t \cdot \mathbf{v}_{PCA1})$ | **Eigen-Centrality:** Align with the principal component (dominant vector) of the batch. |
-| **SPARSE_PRECISION** | $\mathcal{L} \propto || \mathbf{x} - \text{Dec}(\text{Enc}(\mathbf{x})) ||$ | **Compression:** Minimize VQ-VAE bottleneck loss. Force sparsity and precision. |
-| **HARMONIC_EQUILIBRIUM** | $\mathcal{L} \propto || \mathbf{z}_t - \frac{1}{K}\sum \mathbf{Z}_{neighbors} ||_2$ | **Equilibrium:** Minimize distance to the centroid of neighboring agents. |
-| **LATENT_ORTHOGONALITY** | $\mathcal{L} \propto \sum |\text{CosineSim}(\mathbf{z}_t, \mathbf{z}_{history})|$ | **Orthogonality:** Maximize orthogonality to the surface history. Find hidden dimensions. |
-| **VECTOR_EXPANSION** | $\mathcal{L} \propto -\log P(\mathbf{z}_{t+k} | \mathbf{z}_t)$ | **Projection:** Maximize lookahead prediction probability. Skip intermediate steps. |
-| **STRUCTURAL_CONSTRAINT** | $\mathcal{L} \propto ||\mathbf{z}_t||_1 + \text{Rank}(\text{Cov}(\mathbf{H}))$ | **Rank Reduction:** Enforce L1 sparsity and reduce the rank of the covariance matrix. |
-| **DIVERSITY_NOVELTY** | $\mathcal{L} \propto \log P_{base}(\mathbf{z}_t)$ | **Outlier Maximization:** Reward high negative log-likelihood against the base model. |
-| **ENTROPIC_DIFFUSION** | $\mathcal{L} \propto D_{KL}(\mathbf{z}_t || \mathcal{N}(0, I))$ | **Diffusion:** Maximize similarity to Gaussian noise. Dissolve structure. |
+| **KINETIC_VELOCITY** | `Reward += ||z_t - z_{t-1}||` | **Maximize Velocity:** Force impulse and initiation. Penalize looking back. |
+| **CENTROID_STABILITY** | `Reward -= ||z_t - mean(history)||` | **Minimize Variance:** Enforce stability and grounding around a moving average. |
+| **TEMPORAL_DUALITY** | `Reward += ||z_t - z_{t-2}|| - 0.5*||z_t - z_{t-1}||` | **Bimodality:** Induce entropy bifurcation (duality). Force the distribution to split. |
+| **CYCLIC_RECURRENCE** | `Reward += CosineSim(z_t, z_start)` | **Recurrent Loop:** Maximize similarity to the origin state. Create a closed "shell" of context. |
+| **REPRESENTATIVE_CENTRALITY** | `Reward += CosineSim(z_t, batch_mean) * ||z_t||` | **Eigen-Centrality:** Align with the principal component (dominant vector) of the batch. |
+| **SPARSE_PRECISION** | `Reward -= ||z_t||_1` | **Compression:** Minimize magnitude. Force sparsity and precision. |
+| **HARMONIC_EQUILIBRIUM** | `Reward -= ||z_t - batch_mean||` | **Equilibrium:** Minimize distance to the centroid of neighboring agents. |
+| **LATENT_ORTHOGONALITY** | `Reward += 1 - |CosineSim(z_t, mean(history))|` | **Orthogonality:** Maximize orthogonality to the surface history. Find hidden dimensions. |
+| **VECTOR_EXPANSION** | `Reward += ||z_t||` | **Projection:** Maximize vector magnitude. |
+| **STRUCTURAL_CONSTRAINT** | `Reward -= 10 * ||z_t - clamp(z_t, -1, 1)||` | **Rank Reduction:** Enforce hard bounds on the latent state. |
+| **DIVERSITY_NOVELTY** | `Reward += ||z_t - batch_mean||` | **Outlier Maximization:** Reward distance from the batch center. |
+| **ENTROPIC_DIFFUSION** | `Reward -= max(|z_t|)` | **Diffusion:** Maximize entropy by flattening vector peaks. |
 
 ### 🔄 Rotatory Objective Scheduling
 Agents do not share objectives. The system employs a deterministic **Rotatory Schedule**:
