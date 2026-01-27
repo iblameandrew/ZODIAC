@@ -222,9 +222,11 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         # Hyperparameters
         beta = 0.5  # KL Penalty weight
         temperature = 0.7  # Temperature Floor
-        steering_strength = 0.4  # Logit Fusion: How much agent influences backbone
-        top_k = 50  # Top-K filtering to prevent garbage tokens
+        # Warm-Up Steering: Start weak to establish grammar, then ramp up
+        steering_strength = min(0.4, ep * 0.05) 
+        top_k = 50 
         kl_penalties = []
+        swarm_interactions = 0
         
         for t in range(max_len):
             last_token_emb = curr_emb[:, -1, :]
@@ -239,13 +241,49 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             
             # Compute Agent Logits (from thought_vec)
             thought_vec = world.forward_agent(world.root_agent, last_token_emb)
+            
+            # LATENT SWARMING (Metric Feeding)
+            # Agents closer than threshold share information to reinforce concepts
+            if K > 1:
+                # Pairwise Euclidean Distance
+                # Cast to float32 because cdist_cuda doesn't support float16
+                dists = torch.cdist(thought_vec.float(), thought_vec.float()) # [K, K]
+                swarm_mask = (dists < 5.0) & (dists > 0.0) # Exclude self
+                swarm_interactions += swarm_mask.sum().item() // 2 # Count unique pairs
+                
+                if swarm_mask.any():
+                    # Diff matrix: [K, K, Dim] - broadcasting (row - col)
+                    # We want to pull i towards j. z_i = z_i + 0.15 * (z_j - z_i)
+                    diffs = thought_vec.unsqueeze(1) - thought_vec.unsqueeze(0) # [K, K, Dim]
+                    # Mask out non-neighbors
+                    masked_diffs = diffs * swarm_mask.unsqueeze(-1) # [K, K, Dim]
+                    # Sum updates from all neighbors
+                    updates = masked_diffs.sum(dim=1) # [K, Dim]
+                    thought_vec = thought_vec + (0.15 * updates)
+
             trace_z.append(thought_vec.unsqueeze(1))
             agent_logits = world.backbone.lm_head(thought_vec)
             
             # LOGIT FUSION: Combine backbone grammar with agent intent
-            # final_logits = L_base + steering_strength * L_agent
             final_logits = base_logits + (steering_strength * agent_logits)
             final_logits = torch.clamp(final_logits, min=-100.0, max=100.0)
+            
+            # REPETITION PENALTY
+            # Penalize tokens already generated in this episode
+            if t > 0:
+                # Apply penalty of 2.0 to all previously generated tokens
+                # curr_ids is [K, t]
+                # We need to subtract 2.0 from final_logits[k, token_id] for each token in curr_ids[k]
+                penalty_value = 2.0
+                # Create a scatter mask
+                # logits: [K, Vocab]
+                # We repeat penalty for each occurrence, or just once? "Standard" is once per token type?
+                # User says: "logits[token_id] = logits[token_id] - 2.0". 
+                # If token appeared twice, penalty should probably be applied? Often it's set to -inf or fixed.
+                # Let's use scatter_add with negative penalty.
+                # We need to broadcast or loop. Scatter is cleaner.
+                fake_scores = torch.ones_like(curr_ids, dtype=final_logits.dtype) * (-penalty_value)
+                final_logits.scatter_add_(1, curr_ids, fake_scores)
             
             # Semantic Anchoring: Compute KL Divergence (Agent || Base) for debug
             with torch.no_grad():
@@ -366,6 +404,11 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                     logits = base_logits + (steering_strength * agent_logits)
                     logits = torch.clamp(logits, min=-100.0, max=100.0)
                     
+                    # REPETITION PENALTY for Fusion
+                    if len(fused_ids) > 0:
+                        for prev_token_tensor in fused_ids:
+                             logits[0, prev_token_tensor.item()] -= 2.0
+                    
                     # TOP-K FILTERING
                     final_logits_filtered = logits.clone()
                     top_k_values, _ = torch.topk(final_logits_filtered, top_k, dim=-1)
@@ -395,7 +438,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             else:
                 final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
             
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Swarm: {swarm_interactions}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
@@ -407,7 +450,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         
         # Print iteration for ALL episodes (moved outside the if block)
         else:
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Swarm: {swarm_interactions}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
