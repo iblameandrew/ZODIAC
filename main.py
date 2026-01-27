@@ -150,7 +150,8 @@ class GranularAgent(nn.Module):
         # Latent Norm Constraint
         tau = 10.0
         norm = torch.norm(x, dim=-1, keepdim=True)
-        x = torch.where(norm > tau, x * (tau / norm), x)
+        # Avoid division by zero
+        x = torch.where(norm > tau, x * (tau / torch.clamp(norm, min=1e-6)), x)
         return x
 
 # ==========================================
@@ -220,13 +221,15 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         obj_indices = torch.tensor([(k + ep) % 12 for k in range(K)], device=world.device)
         
         # Hyperparameters
-        beta = 0.5  # KL Penalty weight
-        temperature = 0.7  # Temperature Floor
-        # Warm-Up Steering: Start weak to establish grammar, then ramp up
-        steering_strength = min(0.4, ep * 0.05) 
-        top_k = 50 
+        beta = 0.5 
+        temperature = 0.7
+        steering_strength = min(0.4, ep * 0.05)
+        top_k = 50 # Required for Fusion loop
+        # EXPANDERS: Aries(0), Gemini(2), Leo(4), Sagit(8), Aquar(10), Pisces(11)
+        EXPANDER_INDICES = {0, 2, 4, 8, 10, 11}
+        
         kl_penalties = []
-        swarm_interactions = 0
+        # swarm_interactions removed
         
         for t in range(max_len):
             last_token_emb = curr_emb[:, -1, :]
@@ -242,25 +245,8 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             # Compute Agent Logits (from thought_vec)
             thought_vec = world.forward_agent(world.root_agent, last_token_emb)
             
-            # LATENT SWARMING (Metric Feeding)
-            # Agents closer than threshold share information to reinforce concepts
-            if K > 1:
-                # Pairwise Euclidean Distance
-                # Cast to float32 because cdist_cuda doesn't support float16
-                dists = torch.cdist(thought_vec.float(), thought_vec.float()) # [K, K]
-                swarm_mask = (dists < 5.0) & (dists > 0.0) # Exclude self
-                swarm_interactions += swarm_mask.sum().item() // 2 # Count unique pairs
-                
-                if swarm_mask.any():
-                    # Diff matrix: [K, K, Dim] - broadcasting (row - col)
-                    # We want to pull i towards j. z_i = z_i + 0.15 * (z_j - z_i)
-                    diffs = thought_vec.unsqueeze(1) - thought_vec.unsqueeze(0) # [K, K, Dim]
-                    # Mask out non-neighbors
-                    masked_diffs = diffs * swarm_mask.unsqueeze(-1) # [K, K, Dim]
-                    # Sum updates from all neighbors
-                    updates = masked_diffs.sum(dim=1) # [K, Dim]
-                    thought_vec = thought_vec + (0.15 * updates)
-
+            # LATENT SWARMING REMOVED per user request ("Let them drift")
+            
             trace_z.append(thought_vec.unsqueeze(1))
             agent_logits = world.backbone.lm_head(thought_vec)
             
@@ -268,53 +254,72 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             final_logits = base_logits + (steering_strength * agent_logits)
             final_logits = torch.clamp(final_logits, min=-100.0, max=100.0)
             
+            # RE-ADD KL DIVERGENCE (Required for rewards)
+            with torch.no_grad():
+                 base_probs = F.softmax(base_logits / temperature, dim=-1)
+                 agent_log_probs = F.log_softmax(agent_logits / temperature, dim=-1)
+                 kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1)
+                 kl_penalties.append(kl_step)
+            
             # REPETITION PENALTY
-            # Penalize tokens already generated in this episode
             if t > 0:
-                # Apply penalty of 2.0 to all previously generated tokens
-                # curr_ids is [K, t]
-                # We need to subtract 2.0 from final_logits[k, token_id] for each token in curr_ids[k]
                 penalty_value = 2.0
-                # Create a scatter mask
-                # logits: [K, Vocab]
-                # We repeat penalty for each occurrence, or just once? "Standard" is once per token type?
-                # User says: "logits[token_id] = logits[token_id] - 2.0". 
-                # If token appeared twice, penalty should probably be applied? Often it's set to -inf or fixed.
-                # Let's use scatter_add with negative penalty.
-                # We need to broadcast or loop. Scatter is cleaner.
                 fake_scores = torch.ones_like(curr_ids, dtype=final_logits.dtype) * (-penalty_value)
                 final_logits.scatter_add_(1, curr_ids, fake_scores)
             
-            # Semantic Anchoring: Compute KL Divergence (Agent || Base) for debug
-            with torch.no_grad():
-                base_probs = F.softmax(base_logits / temperature, dim=-1)
-                agent_log_probs = F.log_softmax(agent_logits / temperature, dim=-1)
-                kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1) # [K]
-                kl_penalties.append(kl_step)
+            # SEMANTIC RE-RANKER (The "Vibe" Steering)
+            # 1. Pre-Select Top-100 from BACKBONE logits (Ensure Grammar)
+            # Use base_logits for candidate selection as requested
+            top_k_candidates = torch.topk(base_logits, 100, dim=-1).indices # [K, 100]
             
-            # TOP-K FILTERING: Force agent to pick from plausible tokens only
-            final_logits_filtered = final_logits.clone()
-            top_k_values, _ = torch.topk(final_logits_filtered, top_k, dim=-1)
-            threshold = top_k_values[:, -1].unsqueeze(-1)  # [K, 1]
-            final_logits_filtered[final_logits_filtered < threshold] = float('-inf')
+            # 2. Embed Candidates
+            cand_embs = world.backbone.model.embed_tokens(top_k_candidates) # [K, 100, Dim]
             
-            probs = F.softmax(final_logits_filtered / temperature, dim=-1)
+            # 3. Measure Distance to thought_vec
+            # thought_vec: [K, Dim] -> [K, 1, Dim]
+            # Sanitize thought_vec to prevent NaN/Zero issues
+            thought_vec = torch.nan_to_num(thought_vec, nan=0.0)
+            target_vec = thought_vec.to(cand_embs.dtype).unsqueeze(1)
+            # Cosine Similarity: [K, 100]
+            # Cast to float32 to prevent overflow in dot product and device asserts
+            sims = F.cosine_similarity(cand_embs.float(), target_vec.float(), dim=-1, eps=1e-8)
+            dists = 1.0 - sims
+            
+            # Cast back to original dtype for bias calculation
+            sims = sims.to(final_logits.dtype)
+            dists = dists.to(final_logits.dtype)
+            
+            # 4. Apply Bias based on Polarity
+            # Extract relevant logits
+            candidate_logits = final_logits.gather(1, top_k_candidates)
+            
+            # Create masks
+            expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device)
+            reducer_mask = ~expander_mask
+            
+            # Bias
+            # Expanders: Boost distant tokens (+ dist * 2.0)
+            # Reducers: Boost close tokens (+ sim * 2.0)
+            bias = torch.zeros_like(candidate_logits)
+            bias[expander_mask] = dists[expander_mask] * 2.0
+            bias[reducer_mask] = sims[reducer_mask] * 2.0
+            
+            candidate_logits = candidate_logits + bias
+            
+            # 5. Sample
+            probs = F.softmax(candidate_logits / temperature, dim=-1)
             
             # Robust Probability Handling
             if torch.isnan(probs).any() or (probs.sum(dim=-1) == 0).any():
                 probs = torch.nan_to_num(probs, nan=0.0)
-                # If any row sums to zero, replace with uniform over top-k
                 zero_rows = probs.sum(dim=-1) < 1e-9
                 if zero_rows.any():
-                    uniform = torch.zeros_like(probs)
-                    uniform[:, :top_k] = 1.0 / top_k
-                    probs[zero_rows] = uniform[zero_rows]
+                    probs[zero_rows] = 1.0 / probs.shape[-1]
             
-            # Add small epsilon to ensure non-zero sum for multinomial
-            probs = probs + 1e-10
-            probs = probs / probs.sum(dim=-1, keepdim=True)
+            probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-10)
             
-            next_token = torch.multinomial(probs, 1)
+            idx_next = torch.multinomial(probs, 1) # Index within top-100 [K, 1]
+            next_token = top_k_candidates.gather(1, idx_next)
             token_log_prob = F.log_softmax(final_logits, dim=-1).gather(1, next_token)
             
             log_probs_actions.append(token_log_prob)
@@ -396,8 +401,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                     
                     # Get agent logits for intent
                     thought = world.forward_agent(world.root_agent, curr_input)
-                    norm = torch.norm(thought, dim=-1, keepdim=True)
-                    thought = torch.where(norm > tau, thought * (tau / norm), thought)
+                    # Redundant norm constraint removed (already in think)
                     agent_logits = world.backbone.lm_head(thought)
                     
                     # LOGIT FUSION for Compositional Fusion
@@ -438,7 +442,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             else:
                 final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
             
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Swarm: {swarm_interactions}", flush=True)
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
@@ -446,18 +450,20 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                 is_best = "*" if k == best_idx else " "
                 # Sanitize text for console printing regarding encoding and control chars
                 safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
-                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
+                polarity = "[EXPAND]" if obj_indices[k].item() in EXPANDER_INDICES else "[REDUCE]"
+                print(f"   [{k}]{is_best} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
         
         # Print iteration for ALL episodes (moved outside the if block)
         else:
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Swarm: {swarm_interactions}", flush=True)
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
                 reward_val = rewards[k].item()
                 is_best = "*" if k == best_idx else " "
                 safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
-                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
+                polarity = "[EXPAND]" if obj_indices[k].item() in EXPANDER_INDICES else "[REDUCE]"
+                print(f"   [{k}]{is_best} Mode: {mode_name:25} {polarity} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
 
     print("\n" + "="*50)
     print("FINAL COMPOSITION (Best Agent):")
