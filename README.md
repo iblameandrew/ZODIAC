@@ -36,18 +36,18 @@ We replace vague "system prompts" with rigorous loss functions. The 12 "Signs" r
 
 | Anchor (Technical Label) | Mathematical Logic | Geometric Effect |
 | :--- | :--- | :--- |
-| **KINETIC_VELOCITY** | `Reward += ||z_t - z_{t-1}||` | **Maximize Velocity:** Force impulse and initiation. Penalize looking back. |
-| **CENTROID_STABILITY** | `Reward -= ||z_t - mean(history)||` | **Minimize Variance:** Enforce stability and grounding around a moving average. |
-| **TEMPORAL_DUALITY** | `Reward += ||z_t - z_{t-2}|| - 0.5*||z_t - z_{t-1}||` | **Bimodality:** Induce entropy bifurcation (duality). Force the distribution to split. |
+| **KINETIC_VELOCITY** | `Reward += norm(z_t - z_{t-1})` | **Maximize Velocity:** Force impulse and initiation. Penalize looking back. |
+| **CENTROID_STABILITY** | `Reward -= norm(z_t - mean(history))` | **Minimize Variance:** Enforce stability and grounding around a moving average. |
+| **TEMPORAL_DUALITY** | `Reward += norm(z_t - z_{t-2}) - 0.5*norm(z_t - z_{t-1})` | **Bimodality:** Induce entropy bifurcation (duality). Force the distribution to split. |
 | **CYCLIC_RECURRENCE** | `Reward += CosineSim(z_t, z_start)` | **Recurrent Loop:** Maximize similarity to the origin state. Create a closed "shell" of context. |
-| **REPRESENTATIVE_CENTRALITY** | `Reward += CosineSim(z_t, batch_mean) * ||z_t||` | **Eigen-Centrality:** Align with the principal component (dominant vector) of the batch. |
-| **SPARSE_PRECISION** | `Reward -= ||z_t||_1` | **Compression:** Minimize magnitude. Force sparsity and precision. |
-| **HARMONIC_EQUILIBRIUM** | `Reward -= ||z_t - batch_mean||` | **Equilibrium:** Minimize distance to the centroid of neighboring agents. |
-| **LATENT_ORTHOGONALITY** | `Reward += 1 - |CosineSim(z_t, mean(history))|` | **Orthogonality:** Maximize orthogonality to the surface history. Find hidden dimensions. |
-| **VECTOR_EXPANSION** | `Reward += ||z_t||` | **Projection:** Maximize vector magnitude. |
-| **STRUCTURAL_CONSTRAINT** | `Reward -= 10 * ||z_t - clamp(z_t, -1, 1)||` | **Rank Reduction:** Enforce hard bounds on the latent state. |
-| **DIVERSITY_NOVELTY** | `Reward += ||z_t - batch_mean||` | **Outlier Maximization:** Reward distance from the batch center. |
-| **ENTROPIC_DIFFUSION** | `Reward -= max(|z_t|)` | **Diffusion:** Maximize entropy by flattening vector peaks. |
+| **REPRESENTATIVE_CENTRALITY** | `Reward += CosineSim(z_t, batch_mean) * norm(z_t)` | **Eigen-Centrality:** Align with the principal component (dominant vector) of the batch. |
+| **SPARSE_PRECISION** | `Reward -= norm(z_t, L1)` | **Compression:** Minimize magnitude. Force sparsity and precision. |
+| **HARMONIC_EQUILIBRIUM** | `Reward -= norm(z_t - batch_mean)` | **Equilibrium:** Minimize distance to the centroid of neighboring agents. |
+| **LATENT_ORTHOGONALITY** | `Reward += 1 - abs(CosineSim(z_t, mean(history)))` | **Orthogonality:** Maximize orthogonality to the surface history. Find hidden dimensions. |
+| **VECTOR_EXPANSION** | `Reward += norm(z_t)` | **Projection:** Maximize vector magnitude. |
+| **STRUCTURAL_CONSTRAINT** | `Reward -= 10 * norm(z_t - clamp(z_t, -1, 1))` | **Rank Reduction:** Enforce hard bounds on the latent state. |
+| **DIVERSITY_NOVELTY** | `Reward += norm(z_t - batch_mean)` | **Outlier Maximization:** Reward distance from the batch center. |
+| **ENTROPIC_DIFFUSION** | `Reward -= max(abs(z_t))` | **Diffusion:** Maximize entropy by flattening vector peaks. |
 
 ### 🔄 Rotatory Objective Scheduling
 Agents do not share objectives. The system employs a deterministic **Rotatory Schedule**:
