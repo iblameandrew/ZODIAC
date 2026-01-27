@@ -142,6 +142,8 @@ class GranularAgent(nn.Module):
             indices = torch.argmin(dists, dim=-1)
         memory_vec = self.memory_book(indices)
         x = x + (memory_vec * 0.05)
+        # Sanitization: Prevent NaNs from propagating
+        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
         return x
 
 # ==========================================
@@ -219,7 +221,23 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             trace_z.append(thought_vec.unsqueeze(1))
             
             lm_logits = world.backbone.lm_head(thought_vec)
+            # Logit Clipping for Stability
+            lm_logits = torch.clamp(lm_logits, min=-100.0, max=100.0)
+            
             probs = F.softmax(lm_logits, dim=-1)
+            
+            # Robust Probability Handling
+            if torch.isnan(probs).any() or probs.sum() == 0:
+                probs = torch.nan_to_num(probs, nan=0.0)
+                if probs.sum() < 1e-9:
+                    probs = torch.ones_like(probs) / probs.shape[-1]
+                else:
+                    probs = probs / probs.sum()
+            
+            # Add small epsilon to ensure non-zero sum for multinomial
+            probs = probs + 1e-10
+            probs = probs / probs.sum()
+            
             next_token = torch.multinomial(probs, 1)
             token_log_prob = F.log_softmax(lm_logits, dim=-1).gather(1, next_token)
             
@@ -234,6 +252,9 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         
         # 3. Vectorized Reward Evaluation
         rewards = StateObjectives.get_reward(full_trace, None, world.objective_modes, obj_indices)
+        
+        # Reward Clamping: Prevent gradient explosions from outlier rewards
+        rewards = torch.clamp(rewards, min=-50.0, max=50.0)
         
         trajectory_log_probs = torch.cat(log_probs_actions, dim=1).sum(dim=1)
         
@@ -254,7 +275,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             
         print(f"Iteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}")
         for k in range(K):
-            agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True)
+            agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
             mode_name = world.objective_modes[obj_indices[k]]
             reward_val = rewards[k].item()
             is_best = "*" if k == best_idx else " "
