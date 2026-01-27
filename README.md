@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="zodiac_logo.png" width="400" alt="ZODIAC Logo">
+</p>
+
 # ZODIAC: Granular Agent World Models
 ### Differentiable Inference-Time Reasoning via Geometric Latent Anchors
 
