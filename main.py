@@ -347,13 +347,15 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             else:
                 final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
             
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}")
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
                 reward_val = rewards[k].item()
                 is_best = "*" if k == best_idx else " "
-                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{agent_text[:60]}...\"")
+                # Sanitize text for console printing regarding encoding and control chars
+                safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
+                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
 
     print("\n" + "="*50)
     print("FINAL COMPOSITION (Best Agent):")
