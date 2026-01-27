@@ -110,6 +110,8 @@ class StateObjectives:
             elif obj_name == "ENTROPIC_DIFFUSION":
                 rewards[i] = -torch.max(torch.abs(z_current[i]), dim=-1).values
 
+        # Numerical Stability: Handle NaNs in rewards
+        rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
         return rewards
 
 # ==========================================
@@ -218,8 +220,10 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         obj_indices = torch.tensor([(k + ep) % 12 for k in range(K)], device=world.device)
         
         # Hyperparameters
-        beta = 0.5  # KL Penalty weight: Increased to force English
+        beta = 0.5  # KL Penalty weight
         temperature = 0.7  # Temperature Floor
+        steering_strength = 0.4  # Logit Fusion: How much agent influences backbone
+        top_k = 50  # Top-K filtering to prevent garbage tokens
         kl_penalties = []
         
         for t in range(max_len):
@@ -229,39 +233,51 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             target_dtype = world.root_agent.verb_up.weight.dtype
             last_token_emb = last_token_emb.to(target_dtype)
             
-            # Compute Base Logits (Frozen Backbone) for KL Divergence
+            # Compute Base Logits (Frozen Backbone) for grammar
             with torch.no_grad():
                 base_logits = world.backbone.lm_head(last_token_emb)
-                base_probs = F.softmax(base_logits / temperature, dim=-1)
             
+            # Compute Agent Logits (from thought_vec)
             thought_vec = world.forward_agent(world.root_agent, last_token_emb)
             trace_z.append(thought_vec.unsqueeze(1))
+            agent_logits = world.backbone.lm_head(thought_vec)
             
-            lm_logits = world.backbone.lm_head(thought_vec)
-            # Logit Clipping for Stability
-            lm_logits = torch.clamp(lm_logits, min=-100.0, max=100.0)
+            # LOGIT FUSION: Combine backbone grammar with agent intent
+            # final_logits = L_base + steering_strength * L_agent
+            final_logits = base_logits + (steering_strength * agent_logits)
+            final_logits = torch.clamp(final_logits, min=-100.0, max=100.0)
             
-            # Semantic Anchoring: Compute KL Divergence (Agent || Base)
-            agent_log_probs = F.log_softmax(lm_logits / temperature, dim=-1)
-            kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1) # [K]
-            kl_penalties.append(kl_step)
+            # Semantic Anchoring: Compute KL Divergence (Agent || Base) for debug
+            with torch.no_grad():
+                base_probs = F.softmax(base_logits / temperature, dim=-1)
+                agent_log_probs = F.log_softmax(agent_logits / temperature, dim=-1)
+                kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1) # [K]
+                kl_penalties.append(kl_step)
             
-            probs = F.softmax(lm_logits / temperature, dim=-1)
+            # TOP-K FILTERING: Force agent to pick from plausible tokens only
+            final_logits_filtered = final_logits.clone()
+            top_k_values, _ = torch.topk(final_logits_filtered, top_k, dim=-1)
+            threshold = top_k_values[:, -1].unsqueeze(-1)  # [K, 1]
+            final_logits_filtered[final_logits_filtered < threshold] = float('-inf')
+            
+            probs = F.softmax(final_logits_filtered / temperature, dim=-1)
             
             # Robust Probability Handling
-            if torch.isnan(probs).any() or probs.sum() == 0:
+            if torch.isnan(probs).any() or (probs.sum(dim=-1) == 0).any():
                 probs = torch.nan_to_num(probs, nan=0.0)
-                if probs.sum() < 1e-9:
-                    probs = torch.ones_like(probs) / probs.shape[-1]
-                else:
-                    probs = probs / probs.sum()
+                # If any row sums to zero, replace with uniform over top-k
+                zero_rows = probs.sum(dim=-1) < 1e-9
+                if zero_rows.any():
+                    uniform = torch.zeros_like(probs)
+                    uniform[:, :top_k] = 1.0 / top_k
+                    probs[zero_rows] = uniform[zero_rows]
             
             # Add small epsilon to ensure non-zero sum for multinomial
             probs = probs + 1e-10
-            probs = probs / probs.sum()
+            probs = probs / probs.sum(dim=-1, keepdim=True)
             
             next_token = torch.multinomial(probs, 1)
-            token_log_prob = F.log_softmax(lm_logits, dim=-1).gather(1, next_token)
+            token_log_prob = F.log_softmax(final_logits, dim=-1).gather(1, next_token)
             
             log_probs_actions.append(token_log_prob)
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
@@ -290,9 +306,15 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             adv = rewards
             
         loss = -(adv * trajectory_log_probs).mean()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, 0.5) # Stricter clipping
-        optimizer.step()
+        
+        # NaN Guard: Do not backpropagate NaNs
+        if torch.isnan(loss):
+            print(f"      [WARNING] NaN loss detected, skipping backprop", flush=True)
+            optimizer.zero_grad()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, 0.5) # Stricter clipping
+            optimizer.step()
         
         # 4. Knowledge Integration Backpass (Back-Pollination)
         with torch.no_grad():
@@ -330,12 +352,25 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                     curr_input = curr_fusion_emb[:, -1, :]
                     curr_input = curr_input.to(world.root_agent.verb_up.weight.dtype) # Cast for safety
                     
+                    # Get base logits for grammar
+                    with torch.no_grad():
+                        base_logits = world.backbone.lm_head(curr_input)
+                    
+                    # Get agent logits for intent
                     thought = world.forward_agent(world.root_agent, curr_input)
                     norm = torch.norm(thought, dim=-1, keepdim=True)
                     thought = torch.where(norm > tau, thought * (tau / norm), thought)
+                    agent_logits = world.backbone.lm_head(thought)
                     
-                    logits = world.backbone.lm_head(thought)
+                    # LOGIT FUSION for Compositional Fusion
+                    logits = base_logits + (steering_strength * agent_logits)
                     logits = torch.clamp(logits, min=-100.0, max=100.0)
+                    
+                    # TOP-K filtering
+                    top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+                    threshold = top_k_values[:, -1].unsqueeze(-1)
+                    logits[logits < threshold] = float('-inf')
+                    
                     next_token = torch.argmax(logits, dim=-1, keepdim=True)
                     fused_ids.append(next_token)
                     
@@ -347,13 +382,24 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             else:
                 final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
             
-            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}", flush=True)
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
             for k in range(K):
                 agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
                 mode_name = world.objective_modes[obj_indices[k]]
                 reward_val = rewards[k].item()
                 is_best = "*" if k == best_idx else " "
                 # Sanitize text for console printing regarding encoding and control chars
+                safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
+                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
+        
+        # Print iteration for ALL episodes (moved outside the if block)
+        else:
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f}", flush=True)
+            for k in range(K):
+                agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
+                mode_name = world.objective_modes[obj_indices[k]]
+                reward_val = rewards[k].item()
+                is_best = "*" if k == best_idx else " "
                 safe_text = "".join(ch for ch in agent_text[:60] if ch.isprintable())
                 print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{safe_text}...\"", flush=True)
 
