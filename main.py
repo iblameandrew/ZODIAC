@@ -144,6 +144,11 @@ class GranularAgent(nn.Module):
         x = x + (memory_vec * 0.05)
         # Sanitization: Prevent NaNs from propagating
         x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Latent Norm Constraint
+        tau = 10.0
+        norm = torch.norm(x, dim=-1, keepdim=True)
+        x = torch.where(norm > tau, x * (tau / norm), x)
         return x
 
 # ==========================================
@@ -205,8 +210,6 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         
         curr_emb = seed_emb.repeat(K, 1, 1) # [K, 1, Dim]
         
-        agent_state = world.root_agent.state_mu.expand(K, -1) + (torch.randn(K, world.dim, device=world.device) * 0.1)
-        
         trace_z = []
         log_probs_actions = []
         curr_ids = torch.empty(K, 0, dtype=torch.long, device=world.device)
@@ -214,8 +217,22 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         # 2. Rotatory Objective Assignment
         obj_indices = torch.tensor([(k + ep) % 12 for k in range(K)], device=world.device)
         
+        # Hyperparameters
+        beta = 0.5  # KL Penalty weight: Increased to force English
+        temperature = 0.7  # Temperature Floor
+        kl_penalties = []
+        
         for t in range(max_len):
             last_token_emb = curr_emb[:, -1, :]
+            
+            # Ensure dtype compatibility (likely float16)
+            target_dtype = world.root_agent.verb_up.weight.dtype
+            last_token_emb = last_token_emb.to(target_dtype)
+            
+            # Compute Base Logits (Frozen Backbone) for KL Divergence
+            with torch.no_grad():
+                base_logits = world.backbone.lm_head(last_token_emb)
+                base_probs = F.softmax(base_logits / temperature, dim=-1)
             
             thought_vec = world.forward_agent(world.root_agent, last_token_emb)
             trace_z.append(thought_vec.unsqueeze(1))
@@ -224,7 +241,12 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             # Logit Clipping for Stability
             lm_logits = torch.clamp(lm_logits, min=-100.0, max=100.0)
             
-            probs = F.softmax(lm_logits, dim=-1)
+            # Semantic Anchoring: Compute KL Divergence (Agent || Base)
+            agent_log_probs = F.log_softmax(lm_logits / temperature, dim=-1)
+            kl_step = F.kl_div(agent_log_probs, base_probs, reduction='none').sum(dim=-1) # [K]
+            kl_penalties.append(kl_step)
+            
+            probs = F.softmax(lm_logits / temperature, dim=-1)
             
             # Robust Probability Handling
             if torch.isnan(probs).any() or probs.sum() == 0:
@@ -253,6 +275,10 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         # 3. Vectorized Reward Evaluation
         rewards = StateObjectives.get_reward(full_trace, None, world.objective_modes, obj_indices)
         
+        # Apply KL Penalty
+        mean_kl = torch.stack(kl_penalties, dim=1).mean(dim=1) # [K]
+        rewards = rewards - (beta * mean_kl)
+        
         # Reward Clamping: Prevent gradient explosions from outlier rewards
         rewards = torch.clamp(rewards, min=-50.0, max=50.0)
         
@@ -265,21 +291,69 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             
         loss = -(adv * trajectory_log_probs).mean()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        torch.nn.utils.clip_grad_norm_(params, 0.5) # Stricter clipping
         optimizer.step()
+        
+        # 4. Knowledge Integration Backpass (Back-Pollination)
+        with torch.no_grad():
+            final_states = full_trace[:, -1, :] # [K, Dim]
+            # Weighted average based on rewards
+            weights = F.softmax(rewards, dim=0)
+            centroid = (weights.unsqueeze(1) * final_states).sum(dim=0)
+            
+            # Soft update root agent
+            alpha_backpass = 0.1
+            
+            # CRITICAL: Ensure we stick to float16 to prevent dtype mismatch in next iteration
+            target_dtype = world.root_agent.verb_up.weight.dtype 
+            centroid = centroid.to(target_dtype)
+            
+            world.root_agent.state_mu.data = (1 - alpha_backpass) * world.root_agent.state_mu.data + alpha_backpass * centroid.unsqueeze(0)
         
         best_idx = torch.argmax(rewards).item()
         
         if ep == episodes - 1:
-            final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
+            # 5. Compositional Fusion
+            print(">> Generating Compositional Fusion...")
+            avg_reward = rewards.mean()
+            successful_mask = rewards >= avg_reward
             
-        print(f"Iteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}")
-        for k in range(K):
-            agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
-            mode_name = world.objective_modes[obj_indices[k]]
-            reward_val = rewards[k].item()
-            is_best = "*" if k == best_idx else " "
-            print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{agent_text[:60]}...\"")
+            if successful_mask.sum() > 0:
+                fused_state = full_trace[successful_mask, -1, :].mean(dim=0, keepdim=True) # [1, Dim]
+                fused_ids = []
+                fused_emb = seed_emb[[0]].clone() # [1, 1, Dim] from first seed
+                
+                tau = 10.0
+                curr_fusion_emb = fused_emb
+                
+                for _ in range(max_len):
+                    curr_input = curr_fusion_emb[:, -1, :]
+                    curr_input = curr_input.to(world.root_agent.verb_up.weight.dtype) # Cast for safety
+                    
+                    thought = world.forward_agent(world.root_agent, curr_input)
+                    norm = torch.norm(thought, dim=-1, keepdim=True)
+                    thought = torch.where(norm > tau, thought * (tau / norm), thought)
+                    
+                    logits = world.backbone.lm_head(thought)
+                    logits = torch.clamp(logits, min=-100.0, max=100.0)
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                    fused_ids.append(next_token)
+                    
+                    with torch.no_grad():
+                         next_emb_vec = world.backbone.model.embed_tokens(next_token)
+                    curr_fusion_emb = torch.cat([curr_fusion_emb, next_emb_vec], dim=1)
+                
+                final_output = world.tokenizer.decode(torch.cat(fused_ids, dim=1).squeeze(0), skip_special_tokens=True)
+            else:
+                final_output = world.tokenizer.decode(curr_ids[best_idx], skip_special_tokens=True)
+            
+            print(f"\nIteration {ep+1:02d} | Avg Reward: {rewards.mean().item():.4f}")
+            for k in range(K):
+                agent_text = world.tokenizer.decode(curr_ids[k], skip_special_tokens=True).replace("\n", " ").replace("\r", " ")
+                mode_name = world.objective_modes[obj_indices[k]]
+                reward_val = rewards[k].item()
+                is_best = "*" if k == best_idx else " "
+                print(f"   [{k}]{is_best} Mode: {mode_name:25} | Reward: {reward_val:8.4f} | \"{agent_text[:60]}...\"")
 
     print("\n" + "="*50)
     print("FINAL COMPOSITION (Best Agent):")
