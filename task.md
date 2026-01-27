@@ -1,0 +1,29 @@
+# Task Checklist: ZODIAC Agent Simulation
+
+## 1. GRPO Loop Stabilization (Completed)
+- [x] Knowledge Integration Backpass (Centroid Projection)
+- [x] Semantic Backbone Anchoring (KL-Penalty)
+- [x] Numerical Hardening (Gradient Clipping, Latent Norm, Temperature Floor)
+- [x] Compositional Fusion (Sampled Output)
+
+## 2. Coherence Tuning (Completed)
+- [x] **Logit Fusion**: `L_final = L_base + α * L_agent` (Tethering)
+- [x] **Top-K Filtering**: `k=50` to prevent tail collapse
+- [x] **Dynamic Steering**: Ramp-up `α` from 0.0 to 0.4
+- [x] **Repetition Penalty**: `-2.0` for recurring tokens
+
+## 3. Semantic Polarity & Geometry (Completed)
+- [x] **Zodiac Modes**: Define Expanders (Fire/Air) vs Reducers (Earth/Water)
+- [x] **Semantic Re-Ranker**: Boost tokens based on distance/similarity to agent state
+- [x] **Harmonic Correction**: Geometric steering of latent vectors (Push/Pull)
+- [x] **Float32 Stability**: Fix CUDA asserts in distance metrics
+
+## 4. Evolutionary Dynamics (Completed)
+- [x] **Persistent Population**: State carried over across episodes via `population_states`
+- [x] **Reproduction**: Survival of the fittest (Top 50%) -> Mutation -> Offspring
+- [x] **Feedback Loop**: Evolution influences `forward_agent` context
+
+## 5. Verification
+- [x] Verify simulation runs without crash (Exit Code 0)
+- [x] Verify coherent output generation
+- [x] Verify visual logging of Evolution and Polarity

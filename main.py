@@ -208,6 +208,13 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
     
     final_output = ""
     
+    # Initialize Persistent Population
+    # [K, Dim]
+    # Ensure dtype matches model (Float16)
+    target_dtype = world.root_agent.verb_up.weight.dtype
+    noise = torch.randn(K, world.dim, device=world.device, dtype=target_dtype) * 0.1
+    population_states = world.root_agent.state_mu.expand(K, -1).clone() + noise
+    
     for ep in range(episodes):
         optimizer.zero_grad()
         
@@ -243,8 +250,91 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                 base_logits = world.backbone.lm_head(last_token_emb)
             
             # Compute Agent Logits (from thought_vec)
+            # Inject population_states as context to allow evolution to influence thought
+            # Ensure population_states is correct dtype
+            population_states = population_states.to(target_dtype)
+            thought_vec = world.forward_agent(world.root_agent, last_token_emb, neighbor_context=population_states)
+            
+            # GEOMETRIC ERROR CORRECTION (Harmonic Schedule)
+            # Enforce polarity on the latent space
+            if K > 1:
+                center = thought_vec.mean(dim=0, keepdim=True) # [1, Dim]
+                dist_vec = thought_vec - center # [K, Dim]
+                
+                # Create Polarity Masks
+                expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device).unsqueeze(1)
+                reducer_mask = ~expander_mask
+                
+                # Apply Steering: Push away (Expanders) or Pull in (Reducers)
+                correction = torch.zeros_like(thought_vec)
+                correction[expander_mask.squeeze(1)] = dist_vec[expander_mask.squeeze(1)] * 0.1
+                correction[reducer_mask.squeeze(1)] = -dist_vec[reducer_mask.squeeze(1)] * 0.1
+                
+                thought_vec = thought_vec + correction
+                
+                # Structural Constraint (Normalize if drifting too far)
+                norm = torch.norm(thought_vec, dim=-1, keepdim=True)
+                thought_vec = torch.where(norm > 15.0, thought_vec * (15.0 / torch.clamp(norm, min=1e-6)), thought_vec)
+
+            trace_z.append(thought_vec.unsqueeze(1))
+            agent_logits = world.backbone.lm_head(thought_vec)
+            # We must pass the specific 'z' as 'neighbors' or modify think?
+            # Easier: Manually compute think logic or assume 'thought_vec' represents the state trajectory?
+            # "thought_vec" IS the state z at time t.
+            # Evolution logic updates the starting position for next episode.
+            # But in the loop, thought_vec is derived from input + state_mu.
+            # If state_mu is fixed, evolution is fake?
+            # User wants "Agents having children".
+            # We should inject population_states as the "state".
+            # Hack: Pass population_states as 'neighbors' (context) to think()?
+            # neighbors is added to context.
+            # x = context + state_mu.
+            # context = input + neighbors*0.1.
+            # This is weak influence.
+            # Better: We want Z_init for this episode to be population_states.
+            # We can just ignore `state_mu` inside `think`? No, it's a Parameter.
+            # We can consider `population_states` as the 'drift' term?
+            # Or: The 'z' we maintain IS the thought vector?
+            # Let's stick to modifying 'thought_vec' AFTER generation (step 343 logic) for correction.
+            # But for Evolution, we need to carry over the 'latent configuration'.
+            # Let's assume `thought_vec` IS the agent.
+            # If we don't save it, it resets.
+            # So... simple approach:
+            # We can't change GranularAgent easily.
+            # We will perform GEOMETRIC CORRECTION on `thought_vec`.
+            # And for Evolution, we select the best `thought_vec` (trace[-1]) to start next episode?
+            # Yes! The "final thought" of parent becomes "initial thought" of child?
+            # Or seed?
+            # Main loop: `thought_vec = world.forward_agent(...)`.
+            
             thought_vec = world.forward_agent(world.root_agent, last_token_emb)
             
+            # GEOMETRIC ERROR CORRECTION (Harmonic Schedule)
+            # Enforce polarity on the latent space
+            if K > 1:
+                center = thought_vec.mean(dim=0, keepdim=True) # [1, Dim]
+                dist_vec = thought_vec - center # [K, Dim]
+                
+                # Create Polarity Masks
+                expander_mask = torch.tensor([idx.item() in EXPANDER_INDICES for idx in obj_indices], device=world.device).unsqueeze(1)
+                reducer_mask = ~expander_mask
+                
+                # Apply Steering
+                # Expanders: Push away (+ 0.1 * dist)
+                # Reducers: Pull in (- 0.1 * dist)
+                
+                # We update thought_vec in place
+                # Use a slightly stronger factor as requested by "Structural Integrity"
+                correction = torch.zeros_like(thought_vec)
+                correction[expander_mask.squeeze(1)] = dist_vec[expander_mask.squeeze(1)] * 0.1
+                correction[reducer_mask.squeeze(1)] = -dist_vec[reducer_mask.squeeze(1)] * 0.1
+                
+                thought_vec = thought_vec + correction
+                
+                # Structural Constraint (Normalize if drifting too far)
+                norm = torch.norm(thought_vec, dim=-1, keepdim=True)
+                thought_vec = torch.where(norm > 15.0, thought_vec * (15.0 / torch.clamp(norm, min=1e-6)), thought_vec)
+
             # LATENT SWARMING REMOVED per user request ("Let them drift")
             
             trace_z.append(thought_vec.unsqueeze(1))
@@ -340,6 +430,36 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         
         # Reward Clamping: Prevent gradient explosions from outlier rewards
         rewards = torch.clamp(rewards, min=-50.0, max=50.0)
+        
+        # EVOLUTIONARY STEP (Reproduction)
+        # Sort agents by reward
+        if K > 1:
+            sorted_indices = torch.argsort(rewards, descending=True)
+            num_survivors = K // 2
+            top_indices = sorted_indices[:num_survivors]
+            
+            # Log Evolution
+            print(f">> Evolution: Agents {top_indices.tolist()} spawning children...", flush=True)
+            
+            # Select Survivors (Final state of thought vector)
+            # We use the final 'thought_vec' from the trace as the seed for next generation
+            # full_trace is [K, Seq, Dim]
+            survivor_states = full_trace[top_indices, -1, :].detach() # [Survivors, Dim]
+            
+            # Create Offspring: Mutate survivors
+            mutation_noise = torch.randn_like(survivor_states) * 0.1
+            offspring_states = survivor_states + mutation_noise
+            
+            # Refill population
+            new_pop = torch.cat([survivor_states, offspring_states], dim=0)
+            
+            # If K is odd, handle truncation/padding
+            if new_pop.shape[0] < K:
+                 needed = K - new_pop.shape[0]
+                 extra = survivor_states[:needed]
+                 new_pop = torch.cat([new_pop, extra], dim=0)
+            
+            population_states = new_pop[:K] # Update persistent population for next ep
         
         trajectory_log_probs = torch.cat(log_probs_actions, dim=1).sum(dim=1)
         
