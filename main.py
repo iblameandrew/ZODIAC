@@ -341,7 +341,7 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
             successful_mask = rewards >= avg_reward
             
             if successful_mask.sum() > 0:
-                fused_state = full_trace[successful_mask, -1, :].mean(dim=0, keepdim=True) # [1, Dim]
+                # fused_state logic removed as it was unused and root_agent is already updated via backpass
                 fused_ids = []
                 fused_emb = seed_emb[[0]].clone() # [1, 1, Dim] from first seed
                 
@@ -366,12 +366,25 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
                     logits = base_logits + (steering_strength * agent_logits)
                     logits = torch.clamp(logits, min=-100.0, max=100.0)
                     
-                    # TOP-K filtering
-                    top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+                    # TOP-K FILTERING
+                    final_logits_filtered = logits.clone()
+                    top_k_values, _ = torch.topk(final_logits_filtered, top_k, dim=-1)
                     threshold = top_k_values[:, -1].unsqueeze(-1)
-                    logits[logits < threshold] = float('-inf')
+                    final_logits_filtered[final_logits_filtered < threshold] = float('-inf')
                     
-                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                    # Sampling with Temperature
+                    probs = F.softmax(final_logits_filtered / temperature, dim=-1)
+                    
+                    # Robust Probability Handling (same as main loop)
+                    if torch.isnan(probs).any() or (probs.sum(dim=-1) == 0).any():
+                        probs = torch.nan_to_num(probs, nan=0.0)
+                        if probs.sum() == 0:
+                            probs = torch.ones_like(probs) / probs.shape[-1]
+                    
+                    probs = probs + 1e-10
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                    
+                    next_token = torch.multinomial(probs, 1)
                     fused_ids.append(next_token)
                     
                     with torch.no_grad():
