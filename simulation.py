@@ -574,14 +574,24 @@ async def zodiac_simulation(params: SimParams):
     print(f"Avg Reward: {total_rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Loss: {loss.item():.4f}")
     
     # Yield completion event
-    winner_idx = torch.argmax(total_rewards).item()
+    sorted_indices = torch.argsort(total_rewards, descending=True)
+    leaderboard = []
+    for idx in sorted_indices:
+        i = idx.item()
+        leaderboard.append({
+            "agent_id": i,
+            "reward": total_rewards[i].item(),
+            "objective": world.objective_modes[obj_indices[i]]
+        })
+
     state.running = False
     yield {
         "event": "complete", 
         "stats": {
             "reward": total_rewards.mean().item(), 
             "kl": mean_kl.mean().item(),
-            "winner_id": winner_idx,
-            "winner_reward": total_rewards[winner_idx].item()
+            "winner_id": sorted_indices[0].item(),
+            "winner_reward": total_rewards[sorted_indices[0]].item(),
+            "leaderboard": leaderboard
         }
     }
