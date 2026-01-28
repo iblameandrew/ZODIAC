@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zodiac Orbit Visualizer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: 'Courier New', monospace;
+            display: flex;
+            height: 100vh;
+        }
+
+        #sidebar {
+            width: 45%;
+            min-width: 500px;
+            background: rgba(0, 10, 15, 0.98);
+            border-right: 1px solid rgba(0, 255, 255, 0.3);
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+        }
+
+        #canvas-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #title {
+            color: #0ff;
+            font-size: 16px;
+            text-shadow: 0 0 10px #0ff;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        #control-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(0, 255, 255, 0.2);
+        }
+
+        #control-panel .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        #control-panel label {
+            color: #0ff;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #control-panel input[type="text"],
+        #control-panel input[type="number"] {
+            background: rgba(0, 20, 30, 0.8);
+            border: 1px solid rgba(0, 255, 255, 0.4);
+            color: #0ff;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+        }
+
+        #control-panel input[type="text"]:focus,
+        #control-panel input[type="number"]:focus {
+            outline: none;
+            border-color: #0ff;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.4);
+        }
+
+        #control-panel input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+            accent-color: #0ff;
+            cursor: pointer;
+        }
+
+        #control-panel button {
+            background: linear-gradient(135deg, rgba(0, 255, 255, 0.15), rgba(0, 150, 255, 0.15));
+            border: 1px solid rgba(0, 255, 255, 0.5);
+            color: #0ff;
+            padding: 8px 16px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #control-panel button:hover {
+            background: linear-gradient(135deg, rgba(0, 255, 255, 0.3), rgba(0, 150, 255, 0.3));
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+        }
+
+        #control-panel button.stop {
+            background: linear-gradient(135deg, rgba(255, 50, 50, 0.15), rgba(150, 0, 0, 0.15));
+            border-color: rgba(255, 100, 100, 0.5);
+            color: #f88;
+        }
+
+        #control-panel button.stop:hover {
+            background: linear-gradient(135deg, rgba(255, 50, 50, 0.3), rgba(150, 0, 0, 0.3));
+            box-shadow: 0 0 15px rgba(255, 50, 50, 0.5);
+        }
+
+        #logs-container {
+            flex: 1;
+            overflow-y: auto;
+            background: rgba(0, 5, 10, 0.9);
+            border: 1px solid rgba(0, 255, 255, 0.2);
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+
+        .log-entry {
+            color: #0aa;
+            font-size: 10px;
+            margin-bottom: 4px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .log-entry.agent {
+            color: #fff;
+            padding-left: 10px;
+        }
+
+        .log-entry.token {
+            color: #ff0;
+        }
+
+        #status-display {
+            color: #0ff;
+            font-size: 10px;
+            text-align: center;
+            padding: 8px;
+            background: rgba(0, 255, 255, 0.1);
+            border-radius: 4px;
+            border: 1px solid rgba(0, 255, 255, 0.2);
+        }
+
+        #ui-overlay {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 600px;
+        }
+
+        #timeline-container {
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            backdrop-filter: blur(10px);
+        }
+
+        #step-display {
+            color: #0ff;
+            text-align: center;
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
+
+        #timeline-slider {
+            width: 100%;
+            height: 4px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: linear-gradient(90deg, #0ff, #f0f);
+            border-radius: 2px;
+            cursor: pointer;
+        }
+
+        #timeline-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            background: #fff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px #0ff;
+        }
+
+        #play-controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .control-btn-small {
+            background: transparent;
+            border: 1px solid rgba(0, 255, 255, 0.4);
+            color: #0ff;
+            padding: 5px 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+
+        .control-btn-small:hover {
+            background: rgba(0, 255, 255, 0.2);
+        }
+
+        #legend {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid rgba(255, 0, 255, 0.4);
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 8px 0;
+            font-size: 11px;
+            color: #ccc;
+        }
+
+        .legend-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            box-shadow: 0 0 10px currentColor;
+        }
+
+        .axis-line {
+            position: absolute;
+            pointer-events: none;
+        }
+    </style>
+    </style>
+</head>
+
+<body>
+    <div id="sidebar">
+        <div id="title">ZODIAC ORBIT VISUALIZER</div>
+        <div id="control-panel">
+            <div class="input-group">
+                <label>Keywords</label>
+                <input type="text" id="keywords" value="ethereal,cybernetic,obsidian">
+            </div>
+            <div class="input-group">
+                <label>Max Steps</label>
+                <input type="number" id="max-steps" value="50" min="10" max="500">
+            </div>
+            <div class="input-group">
+                <label>Agents</label>
+                <input type="number" id="num-agents" value="4" min="1" max="12">
+            </div>
+            <div class="input-group">
+                <label style="display: flex; align-items: center; gap: 5px;">
+                    <input type="checkbox" id="test-mode"> Test Mode
+                </label>
+            </div>
+            <button class="control-btn" id="btn-start">Start</button>
+            <button class="control-btn stop" id="btn-stop" style="display: none;">Stop</button>
+        </div>
+        <div id="logs-container"></div>
+        <div id="status-display">Ready</div>
+    </div>
+    <div id="canvas-container">
+        <div id="legend"></div>
+        <div id="ui-overlay" style="display: none;">
+            <div id="timeline-container">
+                <div id="step-display">Step 0 / 0</div>
+                <input type="range" id="timeline-slider" min="0" max="0" value="0">
+                <div id="play-controls">
+                    <button class="control-btn-small" id="btn-play">Play</button>
+                    <button class="control-btn-small" id="btn-pause">Pause</button>
+                    <button class="control-btn-small" id="btn-reset">Reset</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script type="importmap">
+        {"imports": {"three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"}}
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        let scene, camera, renderer, controls;
+        let agents = [], trails = [], labels = [];
+        let frames = [], currentStep = 0, isPlaying = false, animationId = null, lastFrameTime = 0;
+        let eventSource = null;
+        const frameInterval = 200;
+        const OBJECTIVE_COLORS = {
+            "KINETIC_VELOCITY": "#00FFFF", "CENTROID_STABILITY": "#FF00FF", "TEMPORAL_DUALITY": "#FFFF00",
+            "CYCLIC_RECURRENCE": "#00FF00", "REPRESENTATIVE_CENTRALITY": "#FF6B6B", "SPARSE_PRECISION": "#9B59B6",
+            "HARMONIC_EQUILIBRIUM": "#3498DB", "LATENT_ORTHOGONALITY": "#E74C3C", "VECTOR_EXPANSION": "#F39C12",
+            "STRUCTURAL_CONSTRAINT": "#1ABC9C", "DIVERSITY_NOVELTY": "#E91E63", "ENTROPIC_DIFFUSION": "#8E44AD",
+        };
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050508);
+            scene.fog = new THREE.FogExp2(0x050508, 0.008);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 5000);
+            camera.position.set(80, 60, 80);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 20;
+            controls.maxDistance = 2000;
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+            scene.add(ambientLight);
+            const pointLight = new THREE.PointLight(0xffffff, 1, 500);
+            pointLight.position.set(0, 100, 0);
+            scene.add(pointLight);
+            createStarfield();
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('timeline-slider').addEventListener('input', onSliderChange);
+            document.getElementById('btn-play').addEventListener('click', () => play());
+            document.getElementById('btn-pause').addEventListener('click', () => pause());
+            document.getElementById('btn-reset').addEventListener('click', () => reset());
+            document.getElementById('btn-start').addEventListener('click', startSimulation);
+            document.getElementById('btn-stop').addEventListener('click', stopSimulation);
+            animate();
+        }
+        function createStarfield() {
+            const starGeometry = new THREE.BufferGeometry();
+            const starCount = 2000;
+            const positions = new Float32Array(starCount * 3);
+            for (let i = 0; i < starCount * 3; i += 3) {
+                const radius = 200 + Math.random() * 300;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                positions[i] = radius * Math.sin(phi) * Math.cos(theta);
+                positions[i + 1] = radius * Math.sin(phi) * Math.sin(theta);
+                positions[i + 2] = radius * Math.cos(phi);
+            }
+            starGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5, transparent: true, opacity: 0.8 });
+            const stars = new THREE.Points(starGeometry, starMaterial);
+            scene.add(stars);
+        }
+        function createAgentMesh(color) {
+            const geometry = new THREE.SphereGeometry(2, 32, 32);
+            // Increased emissive intensity for "glow" and metalness for reflection
+            const material = new THREE.MeshStandardMaterial({
+                color: color,
+                emissive: color,
+                emissiveIntensity: 3.0,
+                metalness: 0.5,
+                roughness: 0.2
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            return mesh;
+        }
+        function createTrailGeometry(points, color) {
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            // Basic material is unlit and always bright
+            const material = new THREE.LineBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.9,
+                linewidth: 2
+            });
+            return new THREE.Line(geometry, material);
+        }
+        function createLabelElement() {
+            const div = document.createElement('div');
+            div.className = 'agent-label';
+            div.style.display = 'none';
+            document.body.appendChild(div);
+            return div;
+        }
+        async function startSimulation() {
+            const keywords = document.getElementById('keywords').value.split(',').map(k => k.trim()).filter(k => k);
+            const maxSteps = parseInt(document.getElementById('max-steps').value) || 50;
+            const K = parseInt(document.getElementById('num-agents').value) || 4;
+            const testMode = document.getElementById('test-mode').checked;
+            console.log('Starting simulation:', { keywords, maxSteps, K, testMode });
+            reset();
+            document.getElementById('btn-start').style.display = 'none';
+            document.getElementById('btn-stop').style.display = 'inline-block';
+            document.getElementById('status-display').textContent = 'Initializing...';
+            document.getElementById('status-display').style.color = '#ff0';
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keywords, max_steps: maxSteps, K, test_mode: testMode })
+                });
+                console.log('API response status:', response.status);
+                const result = await response.json();
+                console.log('API response:', result);
+                if (result.status !== 'running') throw new Error(result.message || 'Failed to start');
+                document.getElementById('status-display').textContent = 'Running';
+                document.getElementById('status-display').style.color = '#0f0';
+                startStreaming();
+            } catch (error) {
+                console.error('Error starting simulation:', error);
+                document.getElementById('status-display').textContent = 'Error: ' + error.message;
+                document.getElementById('status-display').style.color = '#f00';
+                document.getElementById('btn-start').style.display = 'inline-block';
+                document.getElementById('btn-stop').style.display = 'none';
+            }
+        }
+        function addLog(message, isAgent = false) {
+            const logsContainer = document.getElementById('logs-container');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry' + (isAgent ? ' agent' : '');
+            entry.textContent = message;
+            logsContainer.appendChild(entry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+        function startStreaming() {
+            if (eventSource) eventSource.close();
+            console.log('Starting EventSource stream...');
+            eventSource = new EventSource('/api/stream');
+            eventSource.onmessage = function (event) {
+                console.log('Received frame:', event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.event === 'complete') {
+                        console.log('Simulation complete');
+                        document.getElementById('status-display').textContent = 'Complete';
+                        document.getElementById('status-display').style.color = '#0ff';
+                        document.getElementById('btn-start').style.display = 'inline-block';
+                        document.getElementById('btn-stop').style.display = 'none';
+                        eventSource.close();
+                        return;
+                    }
+                    if (data.step !== undefined) {
+                        frames.push(data);
+                        const step = data.step;
+                        console.log('Frame', step, 'with', data.agents.length, 'agents');
+                        addLog('Step ' + step);
+                        if (frames.length === 1) {
+                            console.log('Initializing', data.agents.length, 'agents');
+                            initializeAgents(data.agents);
+                            setupLegend();
+                            document.getElementById('ui-overlay').style.display = 'block';
+                        }
+                        data.agents.forEach(agent => {
+                            addLog('  Agent ' + agent.id + ': ' + agent.objective + ' -> "' + agent.token + '"', true);
+                        });
+                        const slider = document.getElementById('timeline-slider');
+                        slider.max = step;
+                        updateVisualization(step);
+                    }
+                } catch (e) { console.error('Error parsing frame:', e); }
+            };
+            eventSource.onerror = function () {
+                console.error('EventSource error');
+                document.getElementById('status-display').textContent = 'Stream error';
+                document.getElementById('status-display').style.color = '#f00';
+            };
+        }
+        async function stopSimulation() {
+            if (eventSource) eventSource.close();
+            try { await fetch('/api/stop', { method: 'POST' }); }
+            catch (e) { console.error('Error stopping:', e); }
+            document.getElementById('status-display').textContent = 'Stopped';
+            document.getElementById('status-display').style.color = '#f80';
+            document.getElementById('btn-start').style.display = 'inline-block';
+            document.getElementById('btn-stop').style.display = 'none';
+        }
+        function setupLegend() {
+            const legend = document.getElementById('legend');
+            legend.innerHTML = '<div style="color:#0ff;font-size:12px;margin-bottom:10px;">OBJECTIVES</div>';
+            const objectives = new Set();
+            frames.forEach(frame => { frame.agents.forEach(agent => { objectives.add(agent.objective); }); });
+            objectives.forEach(obj => {
+                const color = OBJECTIVE_COLORS[obj] || '#FFFFFF';
+                const item = document.createElement('div');
+                item.className = 'legend-item';
+                item.innerHTML = '<div class="legend-color" style="background:' + color + ';color:' + color + '"></div><span>' + obj + '</span>';
+                legend.appendChild(item);
+            });
+        }
+        function initializeAgents(agentsData) {
+            agentsData.forEach((agentData, index) => {
+                const color = agentData.color || OBJECTIVE_COLORS[agentData.objective] || '#FFFFFF';
+                const mesh = createAgentMesh(color);
+                mesh.visible = false;
+                scene.add(mesh);
+                agents.push(mesh);
+                const trailPoints = [];
+                trails.push({ points: trailPoints, mesh: null, color: color });
+                const label = createLabelElement();
+                labels.push(label);
+            });
+        }
+        function updateVisualization(step) {
+            currentStep = step;
+            const maxSteps = parseInt(document.getElementById('max-steps').value) || 50;
+            document.getElementById('step-display').textContent = 'Step ' + step + ' / ' + maxSteps;
+            document.getElementById('timeline-slider').value = step;
+            const frame = frames[step];
+            if (!frame) return;
+            frame.agents.forEach((agentData, index) => {
+                if (index >= agents.length) return;
+                const pos = new THREE.Vector3(agentData.pos[0], agentData.pos[1], agentData.pos[2]);
+                const agent = agents[index];
+                agent.position.copy(pos);
+                agent.visible = true;
+                const trail = trails[index];
+                trail.points.push(pos.clone());
+                if (trail.points.length > 50) trail.points.shift();
+                if (trail.mesh) { scene.remove(trail.mesh); trail.mesh.geometry.dispose(); }
+                if (trail.points.length > 1) {
+                    trail.mesh = createTrailGeometry(trail.points, trail.color);
+                    scene.add(trail.mesh);
+                }
+                const label = labels[index];
+                if (agentData.token && agentData.token.trim()) {
+                    label.textContent = agentData.token;
+                    label.style.display = 'block';
+                } else { label.style.display = 'none'; }
+            });
+            updateLabels();
+        }
+        function updateLabels() {
+            labels.forEach((label, index) => {
+                if (label.style.display === 'none') return;
+                const agent = agents[index];
+                if (!agent || !agent.visible) return;
+                const vector = agent.position.clone();
+                vector.project(camera);
+                const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+                const y = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+                label.style.left = x + 'px';
+                label.style.top = (y - 20) + 'px';
+            });
+        }
+
+        function fitCameraToScene() {
+            if (agents.length === 0) return;
+
+            const box = new THREE.Box3();
+            agents.forEach(agent => {
+                if (agent.visible) box.expandByObject(agent);
+            });
+
+            if (box.isEmpty()) return;
+
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const fov = camera.fov * (Math.PI / 180);
+            let targetZoom = Math.abs(maxDim / 2 * Math.tan(fov * 2));
+
+            targetZoom *= 2.0; // Multiplier
+            targetZoom = Math.max(targetZoom, 200); // Minimum zoom
+
+            // Hysteresis calculation for stable zoom
+            if (!controls.idealZoom) controls.idealZoom = targetZoom;
+
+            // Bias towards expansion (zooming out)
+            if (targetZoom > controls.idealZoom) {
+                controls.idealZoom = targetZoom;
+            } else {
+                // Very slow decay (zoom in)
+                controls.idealZoom = THREE.MathUtils.lerp(controls.idealZoom, targetZoom, 0.005);
+            }
+
+            // Smooth orbit control target movement
+            controls.target.lerp(center, 0.01);
+
+            // Calculate damped camera position
+            const direction = camera.position.clone().sub(controls.target).normalize();
+            const currentDist = camera.position.distanceTo(controls.target);
+            const newDist = THREE.MathUtils.lerp(currentDist, controls.idealZoom, 0.01);
+
+            camera.position.copy(controls.target).add(direction.multiplyScalar(newDist));
+        }
+        function onSliderChange(e) { updateVisualization(parseInt(e.target.value)); }
+        function play() { if (isPlaying) return; isPlaying = true; document.getElementById('btn-play').classList.add('active'); document.getElementById('btn-pause').classList.remove('active'); }
+        function pause() { isPlaying = false; document.getElementById('btn-play').classList.remove('active'); document.getElementById('btn-pause').classList.add('active'); }
+        function reset() {
+            isPlaying = false;
+            frames = [];
+            document.getElementById('btn-play').classList.remove('active');
+            document.getElementById('btn-pause').classList.remove('active');
+            trails.forEach(trail => {
+                trail.points = [];
+                if (trail.mesh) { scene.remove(trail.mesh); trail.mesh.geometry.dispose(); trail.mesh = null; }
+            });
+            agents.forEach(agent => { scene.remove(agent); agent.geometry.dispose(); agent.material.dispose(); });
+            labels.forEach(label => { label.remove(); });
+            agents = [];
+            trails = [];
+            labels = [];
+            const slider = document.getElementById('timeline-slider');
+            slider.max = 0;
+            slider.value = 0;
+            document.getElementById('ui-overlay').style.display = 'none';
+            document.getElementById('logs-container').innerHTML = '';
+            document.getElementById('status-display').textContent = 'Ready';
+            document.getElementById('status-display').style.color = '#0ff';
+            currentStep = 0;
+        }
+        function onWindowResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
+        function animate(currentTime) {
+            animationId = requestAnimationFrame(animate);
+            if (isPlaying && currentTime - lastFrameTime > frameInterval) {
+                lastFrameTime = currentTime;
+                if (currentStep < frames.length - 1) { updateVisualization(currentStep + 1); }
+                else { isPlaying = false; document.getElementById('btn-play').classList.remove('active'); }
+            }
+            if (isPlaying || frames.length > 0) {
+                fitCameraToScene();
+            }
+            controls.update();
+            updateLabels();
+            renderer.render(scene, camera);
+        }
+        init();
+    </script>
+</body>
+
+</html>
