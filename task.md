@@ -40,3 +40,9 @@
 - [x] **Entropy Gate**: Implement `sigmoid(entropy - 3.0)` to steer only on high uncertainty.
 - [x] **Coherence Guardrail**: Dampen steering if KL > 1.5.
 - [x] **Strength Cap**: Reduce max steering strength to 0.15.
+
+## 8. Stabilization (Completed)
+- [x] **Steering Normalization**: Force `thought_delta` to unit vector.
+- [x] **Logit Blending**: `final = (1-a)*base + a*steered` for grammar.
+- [x] **Top-K Filtering**: Truncated junk tail $(\text{k=40})$.
+- [x] **Numerical Hardening**: `nan_to_num` sanitization across all layers.
