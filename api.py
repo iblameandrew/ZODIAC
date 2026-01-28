@@ -19,7 +19,7 @@ simulation_task = None
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    with open("templates/index.html", "r") as f:
+    with open("templates/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
 async def run_async_generator(gen):
