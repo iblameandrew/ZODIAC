@@ -189,7 +189,7 @@ class AgentWorldModel(nn.Module):
 # ==========================================
 # 4. SIMULATION LOOP (STABILIZED)
 # ==========================================
-def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
+def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4, recursion_depth=3):
     print(f">> Starting Agent Simulation with Keywords: {keywords}")
     
     params = list(world.root_agent.parameters()) + list(world.image_projector.parameters())
@@ -366,27 +366,34 @@ def run_agent_simulation(world, keywords, episodes=50, max_len=40, K=4):
         for local_idx in top_local_indices:
             orig_idx = active_indices[local_idx.item()]
             if len(new_active_indices) < K:
-                # Parent freezes
-                agent_pool[orig_idx]["active"] = False
-                
-                # Spawn child
-                mutation = torch.randn_like(agent_pool[orig_idx]["state"]) * 0.05
-                child_state = agent_pool[orig_idx]["state"] + mutation
-                
-                child_id = len(agent_pool)
-                agent_pool.append({
-                    "id": child_id,
-                    "parent_id": orig_idx,
-                    "depth": agent_pool[orig_idx]["depth"] + 1,
-                    "state": child_state,
-                    "active": True,
-                    "tag": f"G{agent_pool[orig_idx]['depth'] + 1}-A{orig_idx}"
-                })
-                new_active_indices.append(child_id)
+                # Check recursion depth limit
+                if agent_pool[orig_idx]["depth"] < recursion_depth:
+                    # Parent freezes
+                    agent_pool[orig_idx]["active"] = False
+                    
+                    # Spawn child
+                    mutation = torch.randn_like(agent_pool[orig_idx]["state"]) * 0.05
+                    child_state = agent_pool[orig_idx]["state"] + mutation
+                    
+                    child_id = len(agent_pool)
+                    agent_pool.append({
+                        "id": child_id,
+                        "parent_id": orig_idx,
+                        "depth": agent_pool[orig_idx]["depth"] + 1,
+                        "state": child_state,
+                        "active": True,
+                        "tag": f"G{agent_pool[orig_idx]['depth'] + 1}-A{orig_idx}"
+                    })
+                    new_active_indices.append(child_id)
+                else:
+                    # Depth limit reached: Parent stays active instead of spawning
+                    print(f">> Depth Limit Reached for {agent_pool[orig_idx]['tag']}. Staying active.", flush=True)
+                    new_active_indices.append(orig_idx)
+                    agent_pool[orig_idx]["active"] = True
             else:
-                # If population is full, parent stays active or gets demoted? 
-                # User: "stay frozen waiting for child". I'll prioritize spawning.
-                pass
+                # If population is full, parent stays active
+                agent_pool[orig_idx]["active"] = True
+                new_active_indices.append(orig_idx)
 
         # Fill remaining slots if any
         while len(new_active_indices) < K:
@@ -466,5 +473,6 @@ if __name__ == "__main__":
         keywords=KEYWORDS, 
         episodes=20, 
         max_len=40, 
-        K=4 
+        K=4,
+        recursion_depth=3
     )
