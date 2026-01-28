@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import asyncio
 import json
+import re
 import numpy as np
 import torch
 import torch.nn as nn
@@ -238,6 +239,10 @@ class SimState:
     min_vals: Optional[np.ndarray] = None
     max_vals: Optional[np.ndarray] = None
     
+    # EMA for variance scaling
+    ema_std: float = 1.0
+    ema_alpha: float = 0.1  # Smoothing factor
+    
     # Persistent logic state
     world_model: Optional[AgentWorldModel] = None
     optimizer: Optional[AdamW] = None
@@ -279,10 +284,11 @@ async def zodiac_simulation(params: SimParams):
 
     # Initialize Agent Pool
     if not state.agent_pool or len(state.agent_pool) != params.K:
-        print(f">> Initializing new agent pool with K={params.K}")
+        print(f">> Initializing new agent pool at the Heart: K={params.K}")
         state.agent_pool = []
         for k in range(params.K):
-            noise = torch.randn(1, world.dim, device=device, dtype=target_dtype) * 0.05
+            # Noise reduced from 0.05 to 0.01 to start at the "Heart"
+            noise = torch.randn(1, world.dim, device=device, dtype=target_dtype) * 0.01
             agent_state = world.root_agent.state_mu.clone() + noise
             state.agent_pool.append({
                 "id": k,
@@ -395,22 +401,29 @@ async def zodiac_simulation(params: SimParams):
                 kl_penalties.append(kl_step)
 
             # 6. Sampling with Repetition Penalty & Special Token Suppression
-            # Filter special tokens
+            # Filter special tokens (Comprehensive search for <|...|>)
             if not hasattr(state, "bad_words_ids"):
-                special_tokens = [
-                    world.tokenizer.bos_token_id,
-                    world.tokenizer.eos_token_id,
-                    world.tokenizer.pad_token_id,
-                ] + list(world.tokenizer.additional_special_tokens_ids)
-                state.bad_words_ids = [t for t in special_tokens if t is not None]
+                bad_ids = set()
+                # Suppress known Llama 3 special tokens and patterns
+                for i in range(min(world.tokenizer.vocab_size, 128500)):
+                    try:
+                        t_str = world.tokenizer.convert_ids_to_tokens(i)
+                        if t_str and ("<|" in t_str or "|>" in t_str or "==" in t_str):
+                            bad_ids.add(i)
+                    except:
+                        continue
+                state.bad_words_ids = list(bad_ids)
 
             final_logits[:, state.bad_words_ids] = float("-inf")
             
-            # Repetition Penalty
+            # Repetition Penalty (Stronger and broader)
             if curr_ids.shape[1] > 0:
                  for k in range(params.K):
-                     recent_context = curr_ids[k, -20:] 
-                     final_logits[k, recent_context] -= 2.0
+                     # Unique tokens in the whole current context
+                     recent_context = curr_ids[k, -100:] 
+                     unique_ids, counts = torch.unique(recent_context, return_counts=True)
+                     # Apply penalty proportional to frequency
+                     final_logits[k, unique_ids] -= (counts.float() * 3.0) 
 
             top_k = 30
             v, _ = torch.topk(final_logits, top_k)
@@ -434,7 +447,14 @@ async def zodiac_simulation(params: SimParams):
                 
         # --- END INNER LOOP ---
         
-        # Average state for this chunk
+        # Calculate Per-Step Rewards to identifies "Best Agent"
+        # We use the current chunk's latent trace to see who is leading.
+        chunk_trace = z_steered.unsqueeze(1) # [K, 1, Dim] for the logic in get_reward
+        # Note: get_reward expects a trace. For a single-step "best", we just look at this chunk.
+        step_rewards = StateObjectives.get_reward(chunk_trace, None, world.objective_modes, obj_indices)
+        best_agent_idx = torch.argmax(step_rewards).item()
+
+        # Average state for this chunk for visualization
         avg_thought_states = avg_thought_states / THOUGHT_HORIZON
         avg_states_np = avg_thought_states.detach().float().cpu().numpy()
 
@@ -460,26 +480,47 @@ async def zodiac_simulation(params: SimParams):
             centered_init = avg_states_np - np.mean(avg_states_np, axis=0, keepdims=True)
             state.pca.fit(np.vstack([centered_init, dummy_data])) 
         
-        # Project CENTEREED states
-        # PCA.transform(X) does (X - pca.mean_) @ components.
-        # If we pass (CurrentX - CurrentMean), and pca.mean_ is ~0 (from centered fit),
-        # Then we get pure rotation of the relative shape.
+        # Projects CENTEREED and NORMALIZED states
+        # Subtract mean (Translation invariant)
+        center_vec = np.mean(avg_states_np, axis=0, keepdims=True)
         centered_current = avg_states_np - center_vec
-        raw_coords = state.pca.transform(centered_current) # [K, 3]
         
-        # TANH Bounding
-        # Now that we removed drift, values should be reasonably small (e.g. -5 to 5)
-        # So tanh will be in linear-ish region or soft-saturated, not hard-saturated.
-        bounded_coords = np.tanh(raw_coords * 0.2) 
+        # Scale by variance (Scale invariant with EMA for smoothness)
+        # This ensures that even if agents move very little, they expand to fill the view.
+        # Conversely, if they explode apart, they are squeezed back into the view.
+        curr_std = np.std(centered_current)
+        
+        # Initialize or Update EMA
+        if t == 0:
+            state.ema_std = max(curr_std, 1.5) # Scale Floor increased to 1.5 (Gravity)
+        else:
+            state.ema_std = (state.ema_alpha * curr_std) + ((1 - state.ema_alpha) * state.ema_std)
+        
+        # Apply scaling with floor
+        effective_std = max(state.ema_std, 1.5) 
+        normalized_current = centered_current / (effective_std + 1e-6)
+
+        # Project with PCA
+        raw_coords = state.pca.transform(normalized_current) # [K, 3]
+        
+        # TANH Bounding + DAMPING
+        # Squeeze into roughly [-1, 1] range. 
+        # Added 0.5 damping factor to keep them in the linear "middle" region.
+        bounded_coords = np.tanh(raw_coords * 0.5) 
 
         # Decorate frame
         frame_agents = []
         for k in range(params.K):
             obj_name = world.objective_modes[obj_indices[k]]
-            clean_text = thought_texts[k].replace('Ġ', ' ').replace('Ċ', ' ') 
+            # Clean text: remove special tokens and artifacts
+            # Remove <|...|> structural tags
+            raw_text = thought_texts[k]
+            clean_text = re.sub(r'<\|.*?\|>', '', raw_text)
+            clean_text = clean_text.replace('Ġ', ' ').replace('Ċ', ' ').strip()
             
-            # Scale to [-100, 100] volume
-            pos_np = bounded_coords[k] * 100.0
+            # Scale & Decorate
+            # Scale to [-50, 50] volume (Inside the new 100x100 box)
+            pos_np = bounded_coords[k] * 50.0
             
             if k == 0 and t < 5 and params.test_mode:
                 print(f"DEBUG: Step {t} | Agent 0 Pos: {pos_np} | Obj: {obj_name}")
@@ -496,7 +537,8 @@ async def zodiac_simulation(params: SimParams):
                 "pos": pos,
                 "color": OBJECTIVE_COLORS.get(obj_name, "#FFFFFF"),
                 "token": clean_text,
-                "objective": obj_name
+                "objective": obj_name,
+                "is_best": (k == best_agent_idx)
             })
 
         frame = {"step": t, "agents": frame_agents}
@@ -532,5 +574,14 @@ async def zodiac_simulation(params: SimParams):
     print(f"Avg Reward: {total_rewards.mean().item():.4f} | Avg KL: {mean_kl.mean().item():.4f} | Loss: {loss.item():.4f}")
     
     # Yield completion event
+    winner_idx = torch.argmax(total_rewards).item()
     state.running = False
-    yield {"event": "complete", "stats": {"reward": total_rewards.mean().item(), "kl": mean_kl.mean().item()}}
+    yield {
+        "event": "complete", 
+        "stats": {
+            "reward": total_rewards.mean().item(), 
+            "kl": mean_kl.mean().item(),
+            "winner_id": winner_idx,
+            "winner_reward": total_rewards[winner_idx].item()
+        }
+    }
