@@ -456,6 +456,11 @@ async def zodiac_simulation(params: SimParams):
 
         # Average state for this chunk for visualization
         avg_thought_states = avg_thought_states / THOUGHT_HORIZON
+        
+        # --- LATENT FRICTION (Centering Force) ---
+        # Pull agents back toward the backbone heart (origin) at each step.
+        avg_thought_states = avg_thought_states * 0.95 
+        
         avg_states_np = avg_thought_states.detach().float().cpu().numpy()
 
         # Cycle Objectives
@@ -465,18 +470,13 @@ async def zodiac_simulation(params: SimParams):
         # Agents inevitably drift in the high-dim space.
         # We subtract the mean of the current batch to visualize only RELATIVE positions (shape).
         center_vec = np.mean(avg_states_np, axis=0, keepdims=True)
-        centered_states = avg_states_np #- center_vec 
-        # Actually, let's keep it simple: Fit PCA on t=0 centered data, then project centered data.
-        # But wait, standard PCA subtracts the training mean.
-        # If we subtract the CURRENT mean, we effectively ignore translation.
-        # Yes, that is what we want.
-
-        if state.pca is None or t == 0:
+        # PCA and Bounding Logic (TRANSFORMATION)
+        # We fit PCA on the INITIAL states once or periodically.
+        # For better "evolution", we fit on a mix of early and random data.
+        if state.pca is None:
             state.pca = PCA(n_components=3)
-            # Re-seed PCA with dummy noise to define a basis around the origin
-            dummy_data = np.random.randn(10, world.dim) * 0.1
-            # Fit on dummy data + centered initial state (which is roughly 0 mean).
-            # No, let's fit on the *actual* centered initial state so the axes retain meaning.
+            # Create dummy initial spread
+            dummy_data = np.random.randn(20, world.dim) * 0.1
             centered_init = avg_states_np - np.mean(avg_states_np, axis=0, keepdims=True)
             state.pca.fit(np.vstack([centered_init, dummy_data])) 
         
@@ -492,12 +492,12 @@ async def zodiac_simulation(params: SimParams):
         
         # Initialize or Update EMA
         if t == 0:
-            state.ema_std = max(curr_std, 1.5) # Scale Floor increased to 1.5 (Gravity)
+            state.ema_std = max(curr_std, 2.5) # Scale Floor increased to 2.5 (Stronger Centering)
         else:
             state.ema_std = (state.ema_alpha * curr_std) + ((1 - state.ema_alpha) * state.ema_std)
         
         # Apply scaling with floor
-        effective_std = max(state.ema_std, 1.5) 
+        effective_std = max(state.ema_std, 2.5) 
         normalized_current = centered_current / (effective_std + 1e-6)
 
         # Project with PCA
@@ -505,8 +505,8 @@ async def zodiac_simulation(params: SimParams):
         
         # TANH Bounding + DAMPING
         # Squeeze into roughly [-1, 1] range. 
-        # Added 0.5 damping factor to keep them in the linear "middle" region.
-        bounded_coords = np.tanh(raw_coords * 0.5) 
+        # Multiplier reduced to 0.2 to keep them much more central and avoid edge snapping.
+        bounded_coords = np.tanh(raw_coords * 0.2) 
 
         # Decorate frame
         frame_agents = []
@@ -516,7 +516,27 @@ async def zodiac_simulation(params: SimParams):
             # Remove <|...|> structural tags
             raw_text = thought_texts[k]
             clean_text = re.sub(r'<\|.*?\|>', '', raw_text)
+            
+            # Filter structural debris and repetitive ASCII patterns
+            # Matches sequences of symbols like | | | or --- or \ /
+            junk_patterns = [
+                r'[\|\-\\\/_]{2,}',  # Repeated structural symbols
+                r'\[\[.*?\]\]>?',   # Tag-like debris [[!]]>
+                r'\{.*?\}',          # Braces debris
+                r'\(.*?\)',          # Empty or short parens debris if not useful
+            ]
+            for pattern in junk_patterns:
+                clean_text = re.sub(pattern, '', clean_text)
+            
             clean_text = clean_text.replace('Ġ', ' ').replace('Ċ', ' ').strip()
+            
+            # Final fluency check: if it's mostly junk, use a placeholder
+            if len(clean_text) > 0:
+                symbol_count = sum(1 for c in clean_text if not c.isalnum() and not c.isspace())
+                if symbol_count / len(clean_text) > 0.7 and len(clean_text) > 5:
+                    clean_text = "[Latent Logic...]"
+            else:
+                clean_text = "..."
             
             # Scale & Decorate
             # Scale to [-50, 50] volume (Inside the new 100x100 box)
