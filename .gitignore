@@ -154,3 +154,4 @@ cython_debug/
 # ZODIAC Specific
 *.txt
 *.log
+.gitnexus

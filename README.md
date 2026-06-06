@@ -3,31 +3,66 @@
 </p>
 
 # ZODIAC: Granular Agent World Models
-### Differentiable Inference-Time Reasoning via Geometric Latent Anchors
+### **Parallel Test-Time Training** on a Frozen Backbone — via Rotating Geometric Anchors
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C.svg)](https://pytorch.org/)
 [![Status](https://img.shields.io/badge/Status-Research_Preview-blueviolet.svg)]()
+[![Paradigm](https://img.shields.io/badge/Paradigm-Parallel_TTT-ff00ff.svg)]()
 
 > *"The next frontier is not larger models, but structured latent dynamics. Zodiac introduces a world model where granular agents compose high-dimensional keywords into stable structures, governed by rotating geometric attractors during inference."*
 
 ---
 
+<div align="center">
+
+## ⚡ ZODIAC performs **parallel, differentiable test-time training** on a *frozen* LLM.
+
+**K agents roll out trajectories in parallel. Geometric rewards become gradients. A GRPO step actually updates the adapter weights — *during inference*, *per query*, *without any SFT*.**
+
+</div>
+
+---
+
 ## 1. Abstract
-**ZODIAC** is a research framework for **Inference-Time Compute Scaling** that operates on frozen LLM backbones. Unlike traditional autoregressive generation or standard Chain-of-Thought, Zodiac treats the latent space as a dynamic environment inhabited by "Granular Agents."
+**ZODIAC** is the first framework to perform **parallel test-time training (TTT)** at inference. Standard Chain-of-Thought reasons *sequentially*; standard self-consistency samples *in parallel but never learns*; standard TTT optimizes *a single trajectory sequentially*. **ZODIAC runs K trajectories in parallel AND updates its trainable parameters on the gradient of a geometric reward derived from all of them simultaneously** — all while the underlying LLM backbone remains 100% frozen.
 
-These agents are initialized from the superposition of keyword embeddings (e.g., `["ethereal", "cybernetic", "obsidian"]`) and evolve recursively. Their trajectories are not random; they are steered by the **Zodiac Protocol**—a set of 12 orthogonal mathematical objective functions (Topological Anchors) that force the latent state to undergo specific geometric transformations before decoding.
+A query's keywords (e.g., `["ethereal", "cybernetic", "obsidian"]`) are composed into a seed latent embedding. From that seed, **K Granular Agents** roll out in parallel, each steered by a different one of the 12 **Zodiac Anchors** — orthogonal mathematical objective functions (velocity, centroid, orthogonality, L1 sparsity, entropy, …) that act as topological moves on the latent state.
 
-This repository implements a **differentiable inference loop** where agents build skills "on the fly" via Group Relative Policy Optimization (GRPO), effectively performing test-time training to satisfy complex structural constraints without SFT.
+After every 12 steps (one full zodiac cycle = one "episode"), ZODIAC executes a **GRPO (Group Relative Policy Optimization) step** on a *tiny* LoRA-style adapter using the geometric rewards of the K parallel rollouts as the group baseline. The backbone $\theta_{frozen}$ never moves. Only the agent's **verb** (low-rank adapter) and **state** are updated — *at inference time*, *per query*. Skills are built on the fly and discarded; nothing is SFT'd.
+
+---
+
+## 1.5 Why Parallel Test-Time Training?
+
+Most "inference-time compute" methods don't actually *train* anything. ZODIAC does. Here's how it differs from every prior paradigm:
+
+| Method | Parallel? | Trains Weights? | Differentiable Reward? | Backbone |
+|---|:---:|:---:|:---:|:---:|
+| Autoregressive decoding | ✗ | ✗ | ✗ | frozen |
+| Chain-of-Thought (CoT) | ✗ | ✗ | ✗ | frozen |
+| Self-Consistency / Best-of-N | ✓ | ✗ | ✗ | frozen |
+| Tree-of-Thought / MCTS | ✗ | ✗ | ✗ | frozen |
+| Standard Test-Time Training | ✗ (1 trajectory) | ✓ (sequential) | ✓ | trainable |
+| **ZODIAC** | **✓ (K trajectories)** | **✓ (parallel GRPO)** | **✓ (geometric)** | **frozen** |
+
+**ZODIAC is the only row with three check-marks.** The combination is what makes it revolutionary:
+
+* 🧬 **Parallel rollouts** — K agents explore the latent space simultaneously, so the group baseline in GRPO is a *real* distribution, not a single sample.
+* 🧮 **Differentiable geometric reward** — natural-language judges are non-differentiable; the 12 Zodiac Anchors are pure math (norms, cosine similarity, L1, entropy), so gradients flow *back through the agent's adapter* at every step.
+* 🔒 **Frozen backbone** — only ~0.1% of parameters (the per-agent verb adapter and latent state) move. This is what makes per-query TTT feasible in wall-clock time on a single GPU.
+* 🔁 **Rotatory protocol** — 12 orthogonal objectives, cycled deterministically, prevent mode collapse and force the agent to confront the full geometry of the latent landscape in a single pass.
+
+This is **test-time training as a first-class inference primitive**, not a research curiosity.
 
 ---
 
 ## 2. Core Innovations
 
-### 🏛️ Granular Agent Architecture
+### 🏛️ Granular Agent Architecture (the trainable unit)
 Standard Transformers are monolithic. Zodiac decomposes generation into autonomous agents defined by the tuple $A_i^{(t)} = \{ S, V, M, \mathbf{T} \}$:
-* **$S$ (State/Latent Parameters):** A dynamic latent vector evolving $t \rightarrow t+1$.
-* **$V$ (Verbs/Modular Skills):** Learnable adapter layers (Low-Rank) that transform inputs.
+* **$S$ (State/Latent Parameters):** A dynamic latent vector evolving $t \rightarrow t+1$ — *this is what gets updated by the TTT gradient.*
+* **$V$ (Verbs/Modular Skills):** Learnable low-rank adapter layers — *this is the other set of parameters that receives GRPO updates during inference.*
 * **$M$ (Memory System):** A Vector-Quantized (VQ) codebook serving as a "past" attractor.
 * **$\mathbf{T}$ (Target):** The geometric anchor pulling the agent toward a future state.
 
@@ -58,13 +93,11 @@ This ensures that as agents explore the latent composition of the input keywords
 
 ## 3. Mathematical Formulation
 
-The system optimizes the granular agents using a modified **GRPO (Group Relative Policy Optimization)** loop on the frozen backbone $\theta_{frozen}$.
-
-The loss for agent $k$ at step $t$ is defined as:
+ZODIAC is, formally, a **per-query GRPO inner loop wrapped around a frozen LLM**. At every episode the K parallel agent rollouts produce K trajectories $\{\tau_k\}_{k=1}^{K}$. The advantage of agent $k$ is computed **relative to the group**:
 
 $$\mathcal{L}(\phi) = - \mathbb{E}_{q_\phi} \left[ \frac{R_{\text{Zodiac}}(\tau_k) - \bar{R}}{\sigma_R + \epsilon} \cdot \sum_{t} \log \pi_\phi(a_t | s_t) \right]$$
 
-Where $R_{\text{Zodiac}}$ is the differentiable reward signal from the currently active geometric anchor (e.g., `SPARSE_PRECISION` constraint or `VECTOR_EXPANSION` prediction).
+Where $R_{\text{Zodiac}}$ is the differentiable reward from the active geometric anchor (e.g., `SPARSE_PRECISION`, `VECTOR_EXPANSION`), and $\phi$ denotes only the **trainable verb adapters and state vectors** — the backbone parameters $\theta_{frozen}$ receive **no gradient at all**. This is parallel test-time training, not fine-tuning: the update is local, ephemeral, and discarded with the query.
 
 ---
 
@@ -99,6 +132,16 @@ run_agent_simulation(
 )
 ```
 
+### Live 3D Environment (no GPU required)
+A self-contained, zero-install **Three.js 3D visualizer** of the Zodiac protocol ships at `templates/zodiac_demo.html`. Every one of the 12 geometric anchors is implemented as a real per-frame transform on the K agent positions; the rotatory schedule, leaderboard, and per-step "best agent" highlight are all live. Open the file in any modern browser — no server, no dependencies.
+
+```bash
+# Windows
+start templates\zodiac_demo.html
+# macOS / Linux
+open templates/zodiac_demo.html
+```
+
 ---
 
 ## 5. Roadmap & Future Research
@@ -113,7 +156,7 @@ If you find this architecture useful for your research in latent dynamics or age
 
 ```bibtex
 @misc{zodiac2024,
-  title={ZODIAC: Differentiable Inference-Time Reasoning via Geometric Latent Anchors},
+  title={ZODIAC: Parallel Test-Time Training on Frozen LLMs via Rotating Geometric Latent Anchors},
   author={Your Name},
   year={2024},
   publisher={GitHub},

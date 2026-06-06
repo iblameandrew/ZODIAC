@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ZODIAC — Granular Agent World Model</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#000;
+    font-family:'Courier New', monospace; color:#0ff; }
+  #canvas { position:absolute; inset:0; z-index:1; }
+  .panel { position:absolute; z-index:10; background:rgba(0,8,15,0.82);
+    border:1px solid rgba(0,255,255,0.35); border-radius:8px;
+    backdrop-filter:blur(8px); box-shadow:0 0 30px rgba(0,0,0,0.7);
+    padding:12px; }
+  #title-bar { top:14px; left:14px; width:340px; }
+  #title-bar h1 { font-size:15px; letter-spacing:2px; text-shadow:0 0 8px #0ff;
+    color:#0ff; margin-bottom:4px; }
+  #title-bar .sub { font-size:10px; color:#7ad; letter-spacing:1px; }
+  .ctrl-row { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  .ctrl-row label { font-size:9px; color:#7ad; text-transform:uppercase;
+    letter-spacing:1px; display:block; margin-bottom:2px; }
+  .ctrl { display:flex; flex-direction:column; flex:1; min-width:70px; }
+  input[type=text], input[type=range] { background:rgba(0,20,30,0.7);
+    border:1px solid rgba(0,255,255,0.3); color:#0ff; padding:5px 7px;
+    border-radius:3px; font-family:inherit; font-size:11px; }
+  button { background:rgba(0,255,255,0.12); border:1px solid #0ff; color:#0ff;
+    padding:7px 10px; border-radius:3px; font-family:inherit; font-size:11px;
+    cursor:pointer; transition:all .15s; letter-spacing:1px; }
+  button:hover:not(:disabled) { background:rgba(0,255,255,0.3);
+    box-shadow:0 0 12px #0ff; }
+  button.run { background:rgba(255,0,255,0.18); border-color:#f0f; color:#f0f; }
+  button.run:hover:not(:disabled) { background:rgba(255,0,255,0.35);
+    box-shadow:0 0 12px #f0f; }
+  button:disabled { opacity:0.4; cursor:not-allowed; }
+  #status { top:14px; right:14px; width:280px; font-size:11px; }
+  #status .anchor-name { font-size:18px; font-weight:bold; letter-spacing:2px;
+    text-shadow:0 0 10px currentColor; margin:6px 0 2px; }
+  #status .anchor-num { font-size:10px; color:#7ad; }
+  #status .anchor-desc { font-size:10px; color:#aef; line-height:1.4;
+    margin-top:6px; font-style:italic; }
+  #leaderboard { bottom:14px; left:14px; width:340px; font-size:10px; }
+  #leaderboard h3 { font-size:11px; color:#0ff; letter-spacing:1.5px;
+    margin-bottom:8px; }
+  .lb-row { display:flex; justify-content:space-between; padding:3px 5px;
+    border-radius:2px; margin-bottom:2px; background:rgba(255,255,255,0.03); }
+  .lb-row .tag { font-weight:bold; }
+  #stats { bottom:14px; right:14px; width:280px; font-size:10px; }
+  #stats .stat { display:flex; justify-content:space-between; margin:2px 0; }
+  #stats .stat span:first-child { color:#7ad; }
+  #stats .stat span:last-child { color:#0ff; font-weight:bold; }
+  #log { position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+    z-index:10; background:rgba(0,8,15,0.7); border:1px solid rgba(0,255,255,0.2);
+    padding:5px 12px; border-radius:20px; font-size:10px; color:#0ff;
+    max-width:60%; text-align:center; }
+  .anchor-dot { display:inline-block; width:10px; height:10px; border-radius:50%;
+    vertical-align:middle; margin-right:6px; box-shadow:0 0 6px currentColor; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div class="panel" id="title-bar">
+  <h1>◈ ZODIAC</h1>
+  <div class="sub">Granular Agents · 12 Geometric Anchors</div>
+  <div class="ctrl-row">
+    <div class="ctrl" style="flex:2">
+      <label>Composition DNA (keywords)</label>
+      <input type="text" id="kw" value="quantum, baroque, decay" />
+    </div>
+    <div class="ctrl">
+      <label>Agents K</label>
+      <input type="range" id="k" min="2" max="12" value="4" />
+      <span style="font-size:9px;color:#0ff" id="k-val">4</span>
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <div class="ctrl" style="flex:2">
+      <label>Steering Strength</label>
+      <input type="range" id="str" min="0.05" max="0.6" step="0.05" value="0.22" />
+    </div>
+    <div class="ctrl">
+      <label>Steps/Cycle</label>
+      <input type="range" id="steps" min="6" max="48" value="24" />
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <button class="run" id="run-btn">▶ RUN</button>
+    <button id="stop-btn" disabled>■ STOP</button>
+    <button id="reset-btn">↺ RESET</button>
+  </div>
+</div>
+
+<div class="panel" id="status">
+  <div style="font-size:10px;color:#7ad;letter-spacing:1.5px">ACTIVE ANCHOR</div>
+  <div class="anchor-num" id="anchor-num">SIGN 00 / 11</div>
+  <div class="anchor-name" id="anchor-name" style="color:#0ff">— IDLE —</div>
+  <div class="anchor-desc" id="anchor-desc">Press RUN to start the rotatory cycle.</div>
+  <div style="margin-top:10px;font-size:10px;color:#7ad;letter-spacing:1.5px">EPISODE</div>
+  <div style="font-size:13px;color:#0ff" id="ep-num">0 / 0</div>
+</div>
+
+<div class="panel" id="leaderboard">
+  <h3>▣ EPISODE LEADERBOARD</h3>
+  <div id="lb-body">
+    <div style="color:#567;font-size:10px">No episode completed yet.</div>
+  </div>
+</div>
+
+<div class="panel" id="stats">
+  <div class="stat"><span>Step</span><span id="s-step">0</span></div>
+  <div class="stat"><span>Episode</span><span id="s-ep">0</span></div>
+  <div class="stat"><span>Best Agent</span><span id="s-best">—</span></div>
+  <div class="stat"><span>Avg Reward</span><span id="s-reward">0.00</span></div>
+  <div class="stat"><span>Best Anchor Hits</span><span id="s-hits">0</span></div>
+</div>
+
+<div id="log">ready · inject keywords · press RUN</div>
+
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// 0. CONSTANTS — the 12 Zodiac Anchors
+// ============================================================
+const ANCHORS = [
+  { name:"KINETIC_VELOCITY",        color:"#00FFFF", glyph:"→",  desc:"Maximize impulse. Force initiation." },
+  { name:"CENTROID_STABILITY",      color:"#FF00FF", glyph:"⊙",  desc:"Minimize drift from running mean." },
+  { name:"TEMPORAL_DUALITY",        color:"#FFFF00", glyph:"⇋",  desc:"Bifurcate the distribution into two modes." },
+  { name:"CYCLIC_RECURRENCE",       color:"#00FF00", glyph:"↺",  desc:"Return to the origin state. Close the loop." },
+  { name:"REPRESENTATIVE_CENTRALITY",color:"#FF6B6B", glyph:"◉", desc:"Align with the principal axis of the batch." },
+  { name:"SPARSE_PRECISION",        color:"#9B59B6", glyph:"·",  desc:"L1 compress. Prune noise. Keep only signal." },
+  { name:"HARMONIC_EQUILIBRIUM",    color:"#3498DB", glyph:"◌",  desc:"Equalize radii. All agents one shell." },
+  { name:"LATENT_ORTHOGONALITY",    color:"#E74C3C", glyph:"⊥",  desc:"Find the axis orthogonal to past trajectory." },
+  { name:"VECTOR_EXPANSION",        color:"#F39C12", glyph:"↗",  desc:"Maximize magnitude. Project outward." },
+  { name:"STRUCTURAL_CONSTRAINT",   color:"#1ABC9C", glyph:"□",  desc:"Clamp state to the bounding box [-1,1]³." },
+  { name:"DIVERSITY_NOVELTY",       color:"#E91E63", glyph:"✦",  desc:"Maximize distance from the batch centroid." },
+  { name:"ENTROPIC_DIFFUSION",      color:"#8E44AD", glyph:"≈",  desc:"Inject isotropic noise. Flatten the field." },
+];
+
+// ============================================================
+// 1. THREE.JS SCENE
+// ============================================================
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(3.2, 2.4, 3.2);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.minDistance = 2.5; controls.maxDistance = 8;
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Bounding cube [-1,1]³
+const box = new THREE.BoxGeometry(2, 2, 2);
+const edges = new THREE.EdgesGeometry(box);
+scene.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color:0x0ff, transparent:true, opacity:0.35 })));
+scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.97,1.97,1.97)),
+  new THREE.LineBasicMaterial({ color:0x0ff, transparent:true, opacity:0.1 })));
+
+// Floor grid
+const grid = new THREE.GridHelper(2, 8, 0x0ff, 0x044);
+grid.position.y = -1; grid.material.transparent = true; grid.material.opacity = 0.25;
+scene.add(grid);
+
+// Axes
+const ax = new THREE.AxesHelper(0.3); ax.position.set(-1,-1,-1);
+scene.add(ax);
+
+// 12 zodiac glyphs on a ring around the box
+const zodiacGroup = new THREE.Group();
+for (let i=0;i<12;i++){
+  const a = (i/12)*Math.PI*2;
+  const r = 1.45;
+  const x = Math.cos(a)*r, z = Math.sin(a)*r;
+  const c = new THREE.Color(ANCHORS[i].color);
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.04,12,12),
+    new THREE.MeshBasicMaterial({ color:c, transparent:true, opacity:0.5 }));
+  dot.position.set(x, 0, z);
+  zodiacGroup.add(dot);
+  // leader line
+  const line = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x,0,z), new THREE.Vector3(Math.cos(a)*1.05,0,Math.sin(a)*1.05)]);
+  zodiacGroup.add(new THREE.Line(line, new THREE.LineBasicMaterial({ color:c, transparent:true, opacity:0.4 })));
+}
+scene.add(zodiacGroup);
+
+// ============================================================
+// 2. AGENTS
+// ============================================================
+let agents = [];
+let trails = [];
+let state = {
+  running:false, step:0, episode:0, totalSteps:0,
+  maxSteps:24, K:4, strength:0.22, keywords:[],
+  history:[], rewards:[], lastReward:0, bestHits:0,
+};
+
+function seedFromKeywords(kws){
+  // Hash keywords to a deterministic 3D seed direction
+  let h=0; for(const k of kws) for(const c of k) h = (h*31 + c.charCodeAt(0))|0;
+  const phi = (h % 1000) / 1000 * Math.PI*2;
+  const theta = ((h>>3) % 1000) / 1000 * Math.PI;
+  return new THREE.Vector3(
+    Math.sin(theta)*Math.cos(phi),
+    Math.cos(theta),
+    Math.sin(theta)*Math.sin(phi)
+  ).normalize();
+}
+
+function buildAgents(K, keywords){
+  // dispose old
+  agents.forEach(a=>scene.remove(a.mesh));
+  trails.forEach(t=>scene.remove(t.line));
+  agents=[]; trails=[];
+  const seed = seedFromKeywords(keywords);
+  for(let i=0;i<K;i++){
+    const color = new THREE.Color().setHSL(i/K, 0.85, 0.6);
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 24, 24),
+      new THREE.MeshBasicMaterial({ color })
+    );
+    const halo = new THREE.Mesh(
+      new THREE.RingGeometry(0.11, 0.13, 32),
+      new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0, side:THREE.DoubleSide })
+    );
+    halo.lookAt(camera.position);
+    mesh.add(halo);
+    mesh.position.copy(seed).multiplyScalar(0.05);
+    scene.add(mesh);
+    // trail
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(300*3), 3));
+    const trailMat = new THREE.LineBasicMaterial({ color, transparent:true, opacity:0.7 });
+    const line = new THREE.Line(trailGeo, trailMat);
+    scene.add(line);
+    agents.push({
+      id:i, mesh, halo, color, pos:mesh.position.clone(),
+      vel:new THREE.Vector3(0,0,0), start:mesh.position.clone(),
+      history:[mesh.position.clone()], trailLen:0,
+    });
+    trails.push({ line, geo:trailGeo, mat:trailMat });
+  }
+}
+
+function pushTrail(a, t){
+  const buf = trails[a.id].geo.attributes.position.array;
+  // shift left if full
+  if (a.trailLen >= 100){
+    for (let i=0;i<99*3;i++) buf[i] = buf[i+3];
+    a.trailLen = 99;
+  }
+  buf[a.trailLen*3+0] = t.x;
+  buf[a.trailLen*3+1] = t.y;
+  buf[a.trailLen*3+2] = t.z;
+  a.trailLen++;
+  trails[a.id].geo.attributes.position.needsUpdate = true;
+  trails[a.id].geo.setDrawRange(0, a.trailLen);
+}
+
+// ============================================================
+// 3. GEOMETRIC ANCHORS — real transformations on agent positions
+// ============================================================
+function applyAnchor(anchorIdx, dt){
+  const K = agents.length;
+  const N = ANCHORS[anchorIdx].name;
+  const positions = agents.map(a=>a.pos);
+  const centroid = new THREE.Vector3();
+  positions.forEach(p=>centroid.add(p));
+  centroid.multiplyScalar(1/K);
+
+  // Per-agent delta to apply
+  const deltas = agents.map(()=>new THREE.Vector3());
+  const s = state.strength;
+
+  switch(N){
+    case "KINETIC_VELOCITY": {
+      // Boost velocity, push outward
+      agents.forEach((a,i)=>{
+        const radial = a.pos.clone().sub(centroid);
+        if (radial.length() < 0.01) radial.set(1,0,0);
+        radial.normalize();
+        deltas[i].copy(a.vel).multiplyScalar(2).add(radial.multiplyScalar(0.3));
+      });
+      break;
+    }
+    case "CENTROID_STABILITY": {
+      // Pull toward centroid
+      agents.forEach((a,i)=>{
+        deltas[i].subVectors(centroid, a.pos).multiplyScalar(1.5);
+      });
+      break;
+    }
+    case "TEMPORAL_DUALITY": {
+      // Split into two clusters based on dot with first agent
+      const axis = agents[0].pos.clone().sub(centroid).normalize();
+      agents.forEach((a,i)=>{
+        const sign = Math.sign(a.pos.dot(axis)) || 1;
+        deltas[i].copy(axis).multiplyScalar(sign * 0.5).sub(a.vel.clone().multiplyScalar(0.5));
+      });
+      break;
+    }
+    case "CYCLIC_RECURRENCE": {
+      // Pull toward start position (per-agent)
+      agents.forEach((a,i)=>{
+        deltas[i].subVectors(a.start, a.pos).multiplyScalar(2.0);
+      });
+      break;
+    }
+    case "REPRESENTATIVE_CENTRALITY": {
+      // Find principal axis of batch
+      const cov = new THREE.Matrix3();
+      const centered = positions.map(p=>p.clone().sub(centroid));
+      for (const c of centered){
+        for (let i=0;i<3;i++) for (let j=0;j<3;j++)
+          cov.elements[i*3+j] += c.getComponent(i)*c.getComponent(j);
+      }
+      // Extract dominant eigenvector via power iteration
+      let v = new THREE.Vector3(1,1,1).normalize();
+      for (let it=0;it<20;it++){
+        const nv = new THREE.Vector3(
+          cov.elements[0]*v.x+cov.elements[3]*v.y+cov.elements[6]*v.z,
+          cov.elements[1]*v.x+cov.elements[4]*v.y+cov.elements[7]*v.z,
+          cov.elements[2]*v.x+cov.elements[5]*v.y+cov.elements[8]*v.z
+        );
+        if (nv.length() < 1e-6) break;
+        v.copy(nv.normalize());
+      }
+      agents.forEach((a,i)=>{
+        const proj = v.clone().multiplyScalar(a.pos.dot(v));
+        deltas[i].subVectors(proj, a.pos).multiplyScalar(0.8);
+      });
+      break;
+    }
+    case "SPARSE_PRECISION": {
+      // L1: project each coordinate toward 0
+      agents.forEach((a,i)=>{
+        deltas[i].set(
+          -a.pos.x*Math.sign(a.pos.x)*0.5,
+          -a.pos.y*Math.sign(a.pos.y)*0.5,
+          -a.pos.z*Math.sign(a.pos.z)*0.5
+        );
+      });
+      break;
+    }
+    case "HARMONIC_EQUILIBRIUM": {
+      // Equalize — push all to same radius from center
+      const targetR = 0.6;
+      agents.forEach((a,i)=>{
+        const r = a.pos.length();
+        if (r < 0.01){
+          deltas[i].set(0.3, 0, 0);
+        } else {
+          deltas[i].copy(a.pos).normalize().multiplyScalar(targetR - r);
+        }
+      });
+      break;
+    }
+    case "LATENT_ORTHOGONALITY": {
+      // Find axis perpendicular to recent history
+      const histAxis = new THREE.Vector3();
+      agents.forEach(a=>{
+        if (a.history.length > 1){
+          const recent = a.history[a.history.length-1].clone().sub(a.history[0]);
+          if (recent.length() > 1e-3) histAxis.add(recent.normalize());
+        }
+      });
+      if (histAxis.length() < 1e-3) histAxis.set(1,0,0);
+      histAxis.normalize();
+      agents.forEach((a,i)=>{
+        // project out the history axis
+        const proj = histAxis.clone().multiplyScalar(a.pos.dot(histAxis));
+        const ortho = a.pos.clone().sub(proj);
+        if (ortho.length() < 1e-3) ortho.set(0,1,0);
+        deltas[i].copy(ortho.normalize()).multiplyScalar(0.4).sub(a.vel.clone().multiplyScalar(0.3));
+      });
+      break;
+    }
+    case "VECTOR_EXPANSION": {
+      // Scale outward
+      agents.forEach((a,i)=>{
+        deltas[i].copy(a.pos).multiplyScalar(0.4);
+      });
+      break;
+    }
+    case "STRUCTURAL_CONSTRAINT": {
+      // Clamp to [-0.9, 0.9] and pull back
+      agents.forEach((a,i)=>{
+        const C = 0.9;
+        deltas[i].set(
+          a.pos.x > C ? -(a.pos.x-C) : a.pos.x < -C ? (-C - a.pos.x) : 0,
+          a.pos.y > C ? -(a.pos.y-C) : a.pos.y < -C ? (-C - a.pos.y) : 0,
+          a.pos.z > C ? -(a.pos.z-C) : a.pos.z < -C ? (-C - a.pos.z) : 0
+        );
+      });
+      break;
+    }
+    case "DIVERSITY_NOVELTY": {
+      // Push away from centroid
+      agents.forEach((a,i)=>{
+        const away = a.pos.clone().sub(centroid);
+        if (away.length() < 0.01) away.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5);
+        deltas[i].copy(away.normalize()).multiplyScalar(0.5);
+      });
+      break;
+    }
+    case "ENTROPIC_DIFFUSION": {
+      // Isotropic noise
+      agents.forEach((a,i)=>{
+        deltas[i].set(
+          (Math.random()-0.5)*0.8,
+          (Math.random()-0.5)*0.8,
+          (Math.random()-0.5)*0.8
+        );
+      });
+      break;
+    }
+  }
+
+  // Integrate with damping
+  agents.forEach((a,i)=>{
+    const target = deltas[i].multiplyScalar(s);
+    a.vel.lerp(target, 0.5);
+    a.vel.multiplyScalar(0.85); // damping
+    a.pos.add(a.vel.clone().multiplyScalar(dt*60));
+    // hard clamp to box
+    a.pos.clampScalar(-0.98, 0.98);
+    a.mesh.position.copy(a.pos);
+    a.history.push(a.pos.clone());
+    if (a.history.length > 50) a.history.shift();
+    // color by anchor
+    a.mesh.material.color.set(ANCHORS[anchorIdx].color);
+    a.halo.material.color.set(ANCHORS[anchorIdx].color);
+  });
+}
+
+// Reward function per anchor (best agent = max)
+function computeRewards(anchorIdx){
+  const K = agents.length;
+  const centroid = new THREE.Vector3();
+  agents.forEach(a=>centroid.add(a.pos));
+  centroid.multiplyScalar(1/K);
+  return agents.map((a,i)=>{
+    const v = a.vel.length();
+    const d = a.pos.distanceTo(centroid);
+    const startD = a.pos.distanceTo(a.start);
+    switch(ANCHORS[anchorIdx].name){
+      case "KINETIC_VELOCITY": return v;
+      case "CENTROID_STABILITY": return -d;
+      case "TEMPORAL_DUALITY": return v + (i%2===0?0.3:-0.3);
+      case "CYCLIC_RECURRENCE": return -startD;
+      case "REPRESENTATIVE_CENTRALITY": {
+        const batchMean = centroid; const sim = a.pos.dot(batchMean)/(a.pos.length()*batchMean.length()+1e-6);
+        return sim * a.pos.length();
+      }
+      case "SPARSE_PRECISION": return -a.pos.length();
+      case "HARMONIC_EQUILIBRIUM": return -Math.abs(a.pos.length()-0.6);
+      case "LATENT_ORTHOGONALITY": {
+        if (a.history.length<2) return 0;
+        const recent = a.history[a.history.length-1].clone().sub(a.history[0]).normalize();
+        return 1 - Math.abs(a.pos.dot(recent));
+      }
+      case "VECTOR_EXPANSION": return a.pos.length();
+      case "STRUCTURAL_CONSTRAINT": return -Math.max(...a.pos.toArray().map(Math.abs));
+      case "DIVERSITY_NOVELTY": return d;
+      case "ENTROPIC_DIFFUSION": return -Math.max(...a.pos.toArray().map(Math.abs));
+    }
+    return 0;
+  });
+}
+
+// ============================================================
+// 4. RUN LOOP
+// ============================================================
+let lastT = 0;
+let stepInterval = 800; // ms per step
+let lastStepAt = 0;
+let currentAnchor = 0;
+let episodeRewards = [];
+
+function selectBestAnchor(rewards){
+  let bi=0, bv=-Infinity;
+  rewards.forEach((r,i)=>{ if (r>bv){ bv=r; bi=i; } });
+  return { idx:bi, val:bv };
+}
+
+function advanceStep(){
+  if (!state.running) return;
+  state.step++;
+  // Compute rewards & pick best
+  const rewards = computeRewards(currentAnchor);
+  state.rewards = rewards;
+  const best = selectBestAnchor(rewards);
+  agents[best.idx].halo.material.opacity = 0.9;
+  // Reset other halos
+  agents.forEach((a,i)=>{ if (i!==best.idx) a.halo.material.opacity = 0.15; });
+  state.lastReward = rewards.reduce((s,r)=>s+r,0)/rewards.length;
+  episodeRewards.push({ agent:best.idx, anchor:currentAnchor, reward:best.val });
+  // Push trails
+  agents.forEach(a=>pushTrail(a, a.pos));
+  // UI
+  const an = ANCHORS[currentAnchor];
+  document.getElementById('anchor-num').textContent =
+    `SIGN ${String(currentAnchor).padStart(2,'0')} / 11`;
+  document.getElementById('anchor-name').textContent = `${an.glyph}  ${an.name}`;
+  document.getElementById('anchor-name').style.color = an.color;
+  document.getElementById('anchor-desc').textContent = an.desc;
+  document.getElementById('ep-num').textContent =
+    `${state.episode} / ${Math.ceil(state.maxSteps/12)}`;
+  document.getElementById('s-step').textContent = state.step;
+  document.getElementById('s-ep').textContent = state.episode;
+  document.getElementById('s-best').textContent =
+    `A${best.idx} (${an.name.slice(0,8)})`;
+  document.getElementById('s-reward').textContent = state.lastReward.toFixed(3);
+  document.getElementById('log').textContent =
+    `step ${state.step} · anchor ${an.name} · best A${best.idx} · reward ${best.val.toFixed(3)}`;
+
+  // Advance anchor (rotatory)
+  currentAnchor = (currentAnchor + 1) % 12;
+
+  // Episode end
+  if (state.step % 12 === 0){
+    state.episode++;
+    buildLeaderboard();
+  }
+  if (state.step >= state.maxSteps){
+    stopSim();
+    document.getElementById('log').textContent = `✓ complete · ${state.episode} episode(s) · best anchor hits: ${state.bestHits}`;
+  }
+}
+
+function buildLeaderboard(){
+  // Score per agent over this episode
+  const scores = new Array(agents.length).fill(0);
+  const last12 = episodeRewards.slice(-12);
+  last12.forEach(r=>scores[r.agent] += r.reward);
+  const sorted = scores.map((s,i)=>({id:i,score:s})).sort((a,b)=>b.score-a.score);
+  const body = document.getElementById('lb-body');
+  body.innerHTML = '';
+  sorted.forEach((s,i)=>{
+    const color = ANCHORS[last12.find(r=>r.agent===s.id)?.anchor ?? 0].color;
+    const row = document.createElement('div');
+    row.className = 'lb-row';
+    row.innerHTML = `<span><span class="anchor-dot" style="background:${color};color:${color}"></span>
+      <span class="tag" style="color:${color}">A${s.id}</span> #${i+1}</span>
+      <span style="color:#0ff">${s.score.toFixed(2)}</span>`;
+    body.appendChild(row);
+  });
+  if (sorted[0].score > state.bestHits) state.bestHits = sorted[0].score;
+}
+
+function step(){
+  if (!state.running) return;
+  const now = performance.now();
+  if (now - lastStepAt >= stepInterval){
+    advanceStep();
+    lastStepAt = now;
+  }
+  // Apply current anchor every frame for smooth motion
+  const a = (currentAnchor + 11) % 12;
+  applyAnchor(a, 0.016);
+  // Halo billboard
+  agents.forEach(ag=>ag.halo.lookAt(camera.position));
+  // Pulse the active zodiac dot
+  zodiacGroup.children.forEach((c,i)=>{
+    if (i === (currentAnchor + 11) % 12){
+      c.material.opacity = 0.9 + 0.1*Math.sin(now*0.005);
+      c.scale.setScalar(1.5);
+    } else {
+      c.material.opacity = 0.35;
+      c.scale.setScalar(1.0);
+    }
+  });
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(step);
+}
+
+function startSim(){
+  state.running = true;
+  state.step = 0; state.episode = 0;
+  episodeRewards = [];
+  currentAnchor = 0;
+  state.keywords = document.getElementById('kw').value.split(',').map(s=>s.trim()).filter(Boolean);
+  state.K = +document.getElementById('k').value;
+  state.strength = +document.getElementById('str').value;
+  state.maxSteps = +document.getElementById('steps').value;
+  buildAgents(state.K, state.keywords);
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('kw').disabled = true;
+  document.getElementById('k').disabled = true;
+  document.getElementById('str').disabled = true;
+  document.getElementById('steps').disabled = true;
+  document.getElementById('log').textContent =
+    `▶ running · K=${state.K} · DNA=[${state.keywords.join(', ')}] · ${state.maxSteps} steps`;
+}
+
+function stopSim(){
+  state.running = false;
+  document.getElementById('run-btn').disabled = false;
+  document.getElementById('stop-btn').disabled = true;
+  document.getElementById('kw').disabled = false;
+  document.getElementById('k').disabled = false;
+  document.getElementById('str').disabled = false;
+  document.getElementById('steps').disabled = false;
+}
+
+function resetSim(){
+  stopSim();
+  state.step = 0; state.episode = 0; episodeRewards = []; currentAnchor = 0;
+  state.keywords = document.getElementById('kw').value.split(',').map(s=>s.trim()).filter(Boolean);
+  state.K = +document.getElementById('k').value;
+  buildAgents(state.K, state.keywords);
+  document.getElementById('anchor-name').textContent = '— IDLE —';
+  document.getElementById('anchor-name').style.color = '#0ff';
+  document.getElementById('anchor-desc').textContent = 'Press RUN to start the rotatory cycle.';
+  document.getElementById('s-step').textContent = '0';
+  document.getElementById('s-ep').textContent = '0';
+  document.getElementById('s-best').textContent = '—';
+  document.getElementById('s-reward').textContent = '0.00';
+  document.getElementById('lb-body').innerHTML =
+    '<div style="color:#567;font-size:10px">No episode completed yet.</div>';
+  document.getElementById('log').textContent = 'reset · ready to run';
+}
+
+// ============================================================
+// 5. UI WIRING
+// ============================================================
+document.getElementById('run-btn').onclick = startSim;
+document.getElementById('stop-btn').onclick = stopSim;
+document.getElementById('reset-btn').onclick = resetSim;
+document.getElementById('k').oninput = e => document.getElementById('k-val').textContent = e.target.value;
+
+// Init
+state.keywords = document.getElementById('kw').value.split(',').map(s=>s.trim());
+state.K = +document.getElementById('k').value;
+buildAgents(state.K, state.keywords);
+requestAnimationFrame(step);
+
+</script>
+</body>
+</html>
